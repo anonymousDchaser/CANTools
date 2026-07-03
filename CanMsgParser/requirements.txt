@@ -1,0 +1,11 @@
+PyQt5>=5.15
+matplotlib>=3.5
+cantools>=37.0
+python-can>=4.0
+pandas>=1.4
+numpy>=1.21
+openpyxl>=3.0
+xlrd==1.2.0       # 1.2.0 是最后一个支持 .xls (OLE2) 格式的版本
+lxml>=4.9       # pd.read_html 依赖，用于读取 HTML 表格伪装的 .xls 文件
+pytest>=7.0
+pyinstaller>=5.0    # 仅打包用，运行时不需要

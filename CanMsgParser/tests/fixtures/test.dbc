@@ -1,0 +1,16 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 416 EngineData: 8 Vector__XXX
+ SG_ EngineRPM : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Vector__XXX
+ SG_ EngineSpeed : 16|16@1+ (0.1,0) [0|300] "km/h" Vector__XXX
+ SG_ EngineTemp : 32|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+
+BO_ 417 TransmissionData: 8 Vector__XXX
+ SG_ GearPosition : 0|4@1+ (1,0) [0|15] "" Vector__XXX
+ SG_ TransTemp : 4|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
