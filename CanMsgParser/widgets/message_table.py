@@ -71,6 +71,13 @@ class HexDataDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         """绘制 Data 列单元格，逐字节着色。"""
+        # 子项（解码后的信号行）使用默认文本绘制，不走 hex 委托逻辑。
+        # 原因：topLevelItem(row) 对子行返回的是错误的顶层项，会导致子行
+        # 显示成另一帧的 hex 数据。
+        if index.parent().isValid():
+            super().paint(painter, option, index)
+            return
+
         if self._parent_widget is None:
             super().paint(painter, option, index)
             return

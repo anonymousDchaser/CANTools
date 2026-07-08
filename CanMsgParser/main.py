@@ -1,11 +1,10 @@
 # main.py
 """CAN 报文分析工具 — 应用入口"""
+import os
 import sys
 import time
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
-from main_window import MainWindow
-from widgets.splash_screen import SplashScreen
 
 
 def main():
@@ -14,6 +13,20 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     app = QApplication(sys.argv)
+
+    # ── 启动前依赖库检测 ──
+    # 在加载重模块（main_window / pandas / cantools 等）之前进行检查，
+    # 避免因缺失可选依赖（如 xlrd、lxml、openpyxl）导致启动崩溃。
+    from utils.dependency_check import check_dependencies, ensure_dependencies
+    missing = check_dependencies()
+    if missing:
+        if not ensure_dependencies(app):
+            sys.exit(1)  # 用户拒绝安装或安装失败
+        # 安装后模块缓存已失效，重启进程以重新导入所有依赖
+        QMessageBox.information(None, "重启", "依赖库已安装，应用将自动重启。")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    # 依赖就绪，继续正常启动
     app.setApplicationName("CanMsgParser")
 
     # 全局暗色主题样式（补充 MainWindow 自身 QSS 未覆盖的应用级控件）
@@ -125,6 +138,10 @@ def main():
     """)
 
     # ---- 启动画面 ----
+    # 延迟导入：确保依赖检测通过后再加载重模块
+    from main_window import MainWindow
+    from widgets.splash_screen import SplashScreen
+
     splash = SplashScreen()
     splash.show()
     app.processEvents()
