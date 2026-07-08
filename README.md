@@ -230,4 +230,4 @@ python -m pytest tests/ -v
 
 ## 📝 许可
 
-内部工具，仅限授权使用。
+N/A
