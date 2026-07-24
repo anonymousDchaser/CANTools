@@ -3,9 +3,11 @@
 
 ---
 
-# CAN 报文分析工具 (CanMsgParser)
+# CAN 报文分析工具 / CAN报文分析工具 (CanMsgParser / CANMsgParser)
 
 一款类似 Vector CANoe 的车载 CAN 报文分析桌面工具，基于 Python + PyQt5 开发，支持 DBC 解析、BLF/ASC 日志加载、多信号曲线绘制、报文查看、位图可视化等功能。专为汽车电子工程师分析 CAN 总线数据而设计。
+
+> 关键词索引：CAN、CAN报文、CAN报文分析工具、CAN总线、车载报文、CanMsgParser、CANMsgParser、DBC解析、cantools、python-can、PyQt5、CANalyzer、CANoe
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue) ![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
