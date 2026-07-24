@@ -5,8 +5,9 @@ import os
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QTabWidget, QMenuBar, QMenu, QAction, QFileDialog,
+    QTabWidget, QMenuBar, QMenu, QAction, QFileDialog, QDockWidget,
     QStatusBar, QProgressBar, QMessageBox, QLabel, QApplication,
+    QPushButton, QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from PyQt5.QtCore import Qt
 import pandas as pd
@@ -14,11 +15,14 @@ import numpy as np
 from core.dbc_parser import parse_dbc
 from core.can_data import MessageDef, DecodedSignal
 from core.signal_cache import SignalCache
-from widgets.signal_tree import SignalTreeWidget
 from widgets.plot_widget import PlotWidget
+from widgets.connection_status_widget import ConnectionStatusWidget
+from widgets.realtime_message_widget import RealtimeMessageWidget
 from widgets.signal_group_panel import SignalGroupPanel
 from widgets.message_table import MessageTableWidget
 from widgets.bit_layout_view import BitLayoutView
+from widgets.realtime_monitor_widget import RealtimeMonitorWidget
+from widgets.signal_sim_widget import SignalSimWidget
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
 from utils.excel_value_loader import load_value_descriptions
@@ -315,6 +319,10 @@ class MainWindow(QMainWindow):
         self._decoded_signals: list[DecodedSignal] = []
         self._load_worker: LoadWorker | None = None
         self._decode_workers: list[DecodeWorker] = []
+        # 曲线图已选信号与解码批次代次（分发驱动，替代原信号树）
+        self._curve_signals: set = set()        # {(msg_name, sig_name)}
+        self._curve_decode_gen: int = 0         # 避免过期解码批次误绘
+        self._dock_positioned: bool = False     # 分组窗仅首次显示时定位一次
 
         self._setup_ui()
         self._setup_menu()
@@ -351,7 +359,9 @@ class MainWindow(QMainWindow):
                 pass
 
     def _setup_ui(self):
-        """构建主界面布局：Tab 页（曲线图含信号树子面板 + 报文表格 + 位图查看器）"""
+        """构建主界面布局：Tab 页（曲线图 / 报文表格 / 模拟上报信号 /
+        实时监控 / 位图查看器）+ 可停靠悬浮的「信号分组」窗
+        """
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -360,51 +370,118 @@ class MainWindow(QMainWindow):
         # ── Tab 页（唯一的顶层内容）──
         self._tabs = QTabWidget()
 
-        # ─── Tab 1: 曲线图 — 左侧信号树 + 右侧分组面板 & 图表 ───
+        # ─── Tab 1: 曲线图 — 左侧信号树 + 已选信号区；右侧图表 ───
         chart_tab = QWidget()
         chart_layout = QHBoxLayout(chart_tab)
         chart_layout.setContentsMargins(4, 4, 4, 4)
 
         chart_splitter = QSplitter(Qt.Horizontal)
 
-        # 信号树（嵌入曲线图 Tab 左侧）
-        self._signal_tree = SignalTreeWidget()
-        self._signal_tree.selection_changed.connect(self._on_selection_changed)
-        self._signal_tree.plot_requested.connect(self._decode_and_plot)
-        chart_splitter.addWidget(self._signal_tree)
+        # 左侧列：已选信号显示区（由「信号分组」窗分发添加，可删除）
+        left_col = QWidget()
+        left_layout = QVBoxLayout(left_col)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
 
-        # 右侧：分组面板 + 图表
-        chart_right = QWidget()
-        chart_right_layout = QVBoxLayout(chart_right)
-        chart_right_layout.setContentsMargins(0, 0, 0, 0)
-        chart_right_layout.setSpacing(0)
+        sel_label = QLabel("已选信号（可删除）:")
+        sel_label.setStyleSheet("color: #9090a0; font-weight: 500;")
+        left_layout.addWidget(sel_label)
 
-        self._group_panel = SignalGroupPanel()
-        self._group_panel.plot_requested.connect(self._decode_and_plot_group)
-        self._group_panel._add_from_tree_btn.clicked.connect(self._add_tree_signals_to_group)
-        self._group_panel.config_saved.connect(self._on_group_config_saved)
-        chart_right_layout.addWidget(self._group_panel)
+        self._selected_list = QListWidget()
+        self._selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._selected_list.setAlternatingRowColors(True)
+        left_layout.addWidget(self._selected_list, stretch=1)
 
+        sel_btn_bar = QHBoxLayout()
+        self._remove_sel_btn = QPushButton("移除选中")
+        self._remove_sel_btn.setToolTip("从已选列表中移除（取消信号树中的勾选）")
+        self._remove_sel_btn.clicked.connect(self._remove_selected_signals)
+        sel_btn_bar.addWidget(self._remove_sel_btn)
+
+        self._clear_sel_btn = QPushButton("清空")
+        self._clear_sel_btn.setToolTip("清空所有已选信号")
+        self._clear_sel_btn.clicked.connect(self._clear_selected_signals)
+        sel_btn_bar.addWidget(self._clear_sel_btn)
+        left_layout.addLayout(sel_btn_bar)
+
+        # 绘制按钮：对当前已选信号重新解码并绘图
+        self._plot_btn = QPushButton("绘制")
+        self._plot_btn.setProperty("class", "primary")
+        self._plot_btn.setToolTip("对当前已选信号重新解码并绘制曲线")
+        self._plot_btn.clicked.connect(self._decode_and_plot_curve)
+        left_layout.addWidget(self._plot_btn)
+
+        chart_splitter.addWidget(left_col)
+
+        # 右侧：图表
         self._plot_widget = PlotWidget()
-        chart_right_layout.addWidget(self._plot_widget, stretch=3)
-
-        chart_splitter.addWidget(chart_right)
+        chart_splitter.addWidget(self._plot_widget)
         chart_splitter.setStretchFactor(0, 1)
         chart_splitter.setStretchFactor(1, 3)
-        chart_splitter.setSizes([300, 900])
+        chart_splitter.setSizes([320, 900])
 
         chart_layout.addWidget(chart_splitter)
+        # ─── Tab 1: 连接状态 ───
+        self._conn_widget = ConnectionStatusWidget()
+        self._tabs.addTab(self._conn_widget, "🔌 连接状态")
+
         self._tabs.addTab(chart_tab, "📈 曲线图")
 
-        # ─── Tab 2: 报文表格 ───
+        # ─── Tab 3: 报文表格 ───
         self._message_table = MessageTableWidget()
         self._tabs.addTab(self._message_table, "📋 报文表格")
 
-        # ─── Tab 3: 位图查看器（内部已重构为左右面板布局）───
+        # ─── Tab 4: 模拟上报 ───
+        self._sim_widget = SignalSimWidget()
+        self._tabs.addTab(self._sim_widget, "📤 模拟上报")
+
+        # ─── Tab 5: 实时监控 ───
+        self._monitor_widget = RealtimeMonitorWidget()
+        self._tabs.addTab(self._monitor_widget, "📡 实时监控")
+
+        # ─── Tab 6: 实时报文 ───
+        self._realtime_msg_widget = RealtimeMessageWidget()
+        self._tabs.addTab(self._realtime_msg_widget, "📡 实时报文")
+
+        # ─── Tab 7: 位图查看器 ───
         self._bit_layout = BitLayoutView()
         self._tabs.addTab(self._bit_layout, "🔢 位图查看器")
 
+        # 连接状态页信号接线
+        self._conn_widget.dbc_load_requested.connect(self._load_dbc)
+        self._conn_widget.excel_load_requested.connect(self._load_excel_descriptions)
+        self._conn_widget.log_load_requested.connect(self._load_log)
+        self._conn_widget.connection_changed.connect(self._on_connection_changed)
+        # 初始把连接页的通道/波特率推送给各硬件页（不触发连接）
+        self._on_connection_changed(
+            self._conn_widget.get_channel(),
+            self._conn_widget.get_bitrate(),
+            False,
+        )
+
         main_layout.addWidget(self._tabs)
+
+        # ─── 信号分组停靠窗（可悬浮 / 关闭 / 重新打开）───
+        self._setup_group_dock()
+
+    def _setup_group_dock(self):
+        """将 SignalGroupPanel 包装为可停靠/悬浮/关闭的分组窗，供三页共享"""
+        self._group_panel = SignalGroupPanel()
+        self._group_panel.config_saved.connect(self._on_group_config_saved)
+        # 分组窗分发信号到曲线图/实时监控/模拟上报
+        self._group_panel.dispatch_requested.connect(self._on_dispatch)
+        self._group_dock = QDockWidget("信号分组", self)
+        self._group_dock.setWidget(self._group_panel)
+        self._group_dock.setFeatures(
+            QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetClosable
+        )
+        self._group_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        # 初始停靠在左侧（可在「视图」菜单浮动 / 关闭 / 重新打开）
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
+        # 首次显示后再尝试浮动到主窗口左侧外部（_position_group_dock）
+        self._group_dock.setFloating(True)
 
     def _setup_menu(self):
         """构建菜单栏"""
@@ -451,6 +528,10 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # ── 视图菜单 ──
+        view_menu = menubar.addMenu("视图(&V)")
+        view_menu.addAction(self._group_dock.toggleViewAction())
+
         # ── 帮助菜单 ──
         help_menu = menubar.addMenu("帮助(&H)")
         about_action = QAction("关于(&A)", self)
@@ -486,9 +567,16 @@ class MainWindow(QMainWindow):
             self._dbc_path = path
 
             # 通知各子组件
-            self._signal_tree.load_messages(self._messages)
             self._bit_layout.load_messages(self._messages)
             self._group_panel.set_messages(self._messages)
+            # 实时监控 / 模拟上报页同步报文定义与 DBC 路径
+            self._monitor_widget.set_messages(self._messages)
+            self._monitor_widget.set_dbc_path(path)
+            self._sim_widget.set_messages(self._messages)
+            self._sim_widget.set_dbc_path(path)
+            # 实时报文页 / 连接状态页同步
+            self._realtime_msg_widget.set_dbc_path(path)
+            self._conn_widget.set_dbc_path(path)
             # Bug 2 修复：通知报文表格更新 DBC 数据库，
             # 否则先加载日志再加载 DBC 时，表格的 _db 仍为 None
             self._message_table.update_dbc(path)
@@ -521,6 +609,7 @@ class MainWindow(QMainWindow):
 
         self._value_descriptions = desc
         self._plot_widget.set_value_descriptions(desc)
+        self._monitor_widget.set_value_descriptions(desc)
         # 同步 Excel 值描述到位图查看器
         self._bit_layout.set_value_descriptions(self._excel_value_descriptions)
 
@@ -536,6 +625,7 @@ class MainWindow(QMainWindow):
 
     def _load_log_file(self, path: str):
         """异步加载指定路径的日志文件（可被拖放复用）"""
+        self._conn_widget.set_log_path(path)
         # 清空旧数据和缓存
         self._cache.clear()
         self._decoded_signals.clear()
@@ -580,95 +670,125 @@ class MainWindow(QMainWindow):
 
     # ═══════════════════════ 信号勾选与绘图 ═══════════════════════
 
-    def _on_selection_changed(self, checked: list[tuple[str, str]]):
-        """信号树勾选变化回调"""
-        pass  # 绘图按钮由 signal_tree 内部管理
+    def _on_dispatch(self, target: str, signals: list):
+        """信号分组窗分发按钮回调：把信号送到对应目标页（曲线图/实时监控/模拟上报）"""
+        if target == "curve":
+            self._add_curve_signals(signals)
+        elif target == "monitor":
+            self._monitor_widget.add_selected_signals(signals)
+        elif target == "sim":
+            self._sim_widget.add_selected_signals(signals)
 
-    def _decode_and_plot(self):
-        """从信号树获取已勾选信号，启动后台解码并绘图"""
-        checked = self._signal_tree.get_checked_signals()
-        if not checked or not self._dbc_path or self._frame_index is None:
-            if not self._dbc_path:
-                QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
-            elif self._frame_index is None:
-                QMessageBox.warning(self, "提示", "请先加载日志文件")
+    def _add_curve_signals(self, signals: list):
+        """把分发的信号加入曲线图已选集合（去重）；加入即绘图"""
+        added = False
+        for msg_name, sig_name in signals:
+            if (msg_name, sig_name) not in self._curve_signals:
+                self._curve_signals.add((msg_name, sig_name))
+                added = True
+        if added:
+            self._refresh_curve_list()
+            # 加入即绘图
+            self._decode_and_plot_curve()
+
+    def _refresh_curve_list(self):
+        """刷新曲线图「已选信号」列表（按 (msg_name, sig_name) 去重）"""
+        self._selected_list.blockSignals(True)
+        self._selected_list.clear()
+        for msg_name, sig_name in sorted(self._curve_signals):
+            item = QListWidgetItem(f"{sig_name}  ({msg_name})")
+            item.setData(Qt.UserRole, (msg_name, sig_name))
+            self._selected_list.addItem(item)
+        self._selected_list.blockSignals(False)
+
+    def _remove_selected_signals(self):
+        """从已选列表中移除选中项"""
+        for item in self._selected_list.selectedItems():
+            self._curve_signals.discard(item.data(Qt.UserRole))
+        self._refresh_curve_list()
+
+    def _clear_selected_signals(self):
+        """清空所有已选信号"""
+        self._curve_signals.clear()
+        self._refresh_curve_list()
+
+    def _decode_and_plot_curve(self):
+        """对曲线图已选信号解码并绘图（加入即绘图 / 点击「绘制」）"""
+        signals = sorted(self._curve_signals)
+        if not signals:
             return
-
+        if not self._dbc_path:
+            QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
+            return
+        if self._frame_index is None:
+            QMessageBox.warning(self, "提示", "请先加载日志文件")
+            return
+        self._curve_decode_gen += 1
+        gen = self._curve_decode_gen
         self._decoded_signals.clear()
-        self._statusbar.showMessage(f"正在解码 {len(checked)} 个信号...")
-
-        for msg_name, sig_name in checked:
+        self._statusbar.showMessage(f"正在解码 {len(signals)} 个信号...")
+        for msg_name, sig_name in signals:
             worker = DecodeWorker(
                 self._dbc_path, msg_name, sig_name,
                 self._frame_index, self._raw_data, self._cache,
             )
-            worker.finished.connect(self._on_decode_finished)
-            worker.error.connect(lambda e: QMessageBox.warning(self, "解码错误", e))
+            worker.finished.connect(
+                lambda ds, g=gen: self._on_curve_decode_finished(ds, g)
+            )
+            worker.error.connect(
+                lambda e: QMessageBox.warning(self, "解码错误", e)
+            )
             worker.start()
             self._decode_workers.append(worker)
 
-    def _on_decode_finished(self, decoded_signal: DecodedSignal):
-        """单个信号解码完成回调"""
+    def _on_curve_decode_finished(self, decoded_signal: DecodedSignal, gen: int):
+        """曲线图信号解码完成回调（带批次代次，避免过期批次误绘）"""
+        if gen != self._curve_decode_gen:
+            return
         self._decoded_signals.append(decoded_signal)
-
-        # 所有信号都解码完成后统一绘图
-        checked = self._signal_tree.get_checked_signals()
-        if len(self._decoded_signals) >= len(checked):
+        if len(self._decoded_signals) >= len(self._curve_signals):
             self._plot_widget.plot_signals(self._decoded_signals)
-            self._tabs.setCurrentIndex(0)  # 切换到曲线图 Tab
+            self._tabs.setCurrentIndex(1)
             self._statusbar.showMessage(
                 f"绘图完成: {len(self._decoded_signals)} 个信号"
             )
 
-    def _add_tree_signals_to_group(self):
-        """将信号树中当前勾选的信号添加到分组面板"""
-        checked = self._signal_tree.get_checked_signals()
-        if not checked:
-            QMessageBox.information(self, "提示", "请先在信号树中勾选信号")
+    def _on_connection_changed(self, channel: str, bitrate: int, connected: bool):
+        """连接状态页通道/波特率/连接状态变化：推送给各硬件页"""
+        self._monitor_widget.set_connection(channel, bitrate)
+        self._sim_widget.set_connection(channel, bitrate)
+        self._realtime_msg_widget.set_connection(channel, bitrate)
+        if connected:
+            self._realtime_msg_widget.start_capture(channel, bitrate)
+        else:
+            self._realtime_msg_widget.stop_capture()
+
+    def _position_group_dock(self):
+        """将分组窗浮动到主窗口左侧外部（空间不足则停靠回左侧）"""
+        dock = self._group_dock
+        screen = QApplication.primaryScreen()
+        if screen is None:
             return
-
-        # 查找每个信号对应的 frame_id hex 字符串
-        signals_with_id = []
-        msg_lookup = {m.name: m for m in self._messages}
-        for msg_name, sig_name in checked:
-            msg = msg_lookup.get(msg_name)
-            frame_id_hex = f"0x{msg.frame_id:03X}" if msg else ""
-            signals_with_id.append((msg_name, sig_name, frame_id_hex))
-
-        self._group_panel.add_signals_from_tree(signals_with_id)
-
-    def _decode_and_plot_group(self, checked: list[tuple[str, str]]):
-        """解码分组中已勾选的信号并绘图"""
-        if not checked or not self._dbc_path or self._frame_index is None:
-            if not self._dbc_path:
-                QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
-            elif self._frame_index is None:
-                QMessageBox.warning(self, "提示", "请先加载日志文件")
+        avail = screen.availableGeometry()
+        w = dock.width() if dock.width() > 0 else 340
+        h = max(420, int(avail.height() * 0.72))
+        x = self.x() - w - 12
+        y = self.y() + 30
+        if x < avail.x():
+            # 左侧无足够空间，停靠回左侧
+            dock.setFloating(False)
+            self.addDockWidget(Qt.LeftDockWidgetArea, dock)
             return
+        dock.setFloating(True)
+        dock.resize(w, h)
+        dock.move(x, y)
 
-        self._decoded_signals.clear()
-        self._statusbar.showMessage(f"正在解码 {len(checked)} 个信号...")
-
-        for msg_name, sig_name in checked:
-            worker = DecodeWorker(
-                self._dbc_path, msg_name, sig_name,
-                self._frame_index, self._raw_data, self._cache,
-            )
-            worker.finished.connect(self._on_group_decode_finished)
-            worker.error.connect(lambda e: QMessageBox.warning(self, "解码错误", e))
-            worker.start()
-            self._decode_workers.append(worker)
-
-    def _on_group_decode_finished(self, decoded_signal: DecodedSignal):
-        """分组信号解码完成回调"""
-        self._decoded_signals.append(decoded_signal)
-        group_checked = self._group_panel.get_checked_signals()
-        if len(self._decoded_signals) >= len(group_checked):
-            self._plot_widget.plot_signals(self._decoded_signals)
-            self._tabs.setCurrentIndex(0)
-            self._statusbar.showMessage(
-                f"分组绘图完成: {len(self._decoded_signals)} 个信号"
-            )
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 仅首次显示后将分组窗尝试浮动到左侧外部
+        if not self._dock_positioned:
+            self._dock_positioned = True
+            self._position_group_dock()
 
     def _on_group_config_saved(self, path: str):
         """分组配置保存回调：记住路径以便下次启动时自动加载"""
@@ -733,9 +853,16 @@ class MainWindow(QMainWindow):
         """
         self._messages = parse_dbc(path)
         self._dbc_path = path
-        self._signal_tree.load_messages(self._messages)
         self._bit_layout.load_messages(self._messages)
         self._group_panel.set_messages(self._messages)
+        # 实时监控 / 模拟上报页同步报文定义与 DBC 路径
+        self._monitor_widget.set_messages(self._messages)
+        self._monitor_widget.set_dbc_path(path)
+        self._sim_widget.set_messages(self._messages)
+        self._sim_widget.set_dbc_path(path)
+        # 实时报文页 / 连接状态页同步
+        self._realtime_msg_widget.set_dbc_path(path)
+        self._conn_widget.set_dbc_path(path)
         # Bug 2 修复：通知报文表格更新 DBC 数据库
         self._message_table.update_dbc(path)
         self._build_value_descriptions()
@@ -768,6 +895,7 @@ class MainWindow(QMainWindow):
         """
         self._excel_value_descriptions = load_value_descriptions(path)
         self._excel_path = path
+        self._conn_widget.set_excel_path(path)
         self._build_value_descriptions()
         count = sum(len(v) for v in self._excel_value_descriptions.values())
         prefix = "已自动加载" if auto else "加载完成"
@@ -814,6 +942,18 @@ class MainWindow(QMainWindow):
         QMessageBox.about(self, "关于 CAN 报文分析工具", about_text)
 
     # ═══════════════════════ 拖拽支持 ═══════════════════════
+
+    def closeEvent(self, event):
+        """退出前停止后台监控/模拟上报线程，避免线程悬挂"""
+        try:
+            self._monitor_widget.stop()
+        except Exception:
+            pass
+        try:
+            self._sim_widget.stop()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def dragEnterEvent(self, event):
         """接受 .dbc / .blf / .asc / .xlsx / .xls 文件的拖拽"""

@@ -11,7 +11,8 @@ from core.can_data import MessageDef
 class SignalTreeWidget(QWidget):
     """左侧信号树面板"""
     selection_changed = pyqtSignal(list)
-    plot_requested = pyqtSignal()
+    # (target, signals) - target in {"curve","monitor","sim"}
+    dispatch_requested = pyqtSignal(str, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -42,13 +43,6 @@ class SignalTreeWidget(QWidget):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(6)
 
-        # 主要操作按钮：绘图
-        self._plot_btn = QPushButton("绘图")
-        self._plot_btn.setProperty("class", "primary")
-        self._plot_btn.setEnabled(False)
-        self._plot_btn.clicked.connect(self._on_plot_clicked)
-        btn_layout.addWidget(self._plot_btn)
-
         # 次要操作按钮
         self._select_all_btn = QPushButton("全选当前")
         self._select_all_btn.clicked.connect(self._on_select_all)
@@ -58,6 +52,26 @@ class SignalTreeWidget(QWidget):
         self._deselect_all_btn.clicked.connect(self._on_deselect_all)
         btn_layout.addWidget(self._deselect_all_btn)
         layout.addLayout(btn_layout)
+
+        # 分发按钮栏：将搜索树中勾选的信号发送到曲线图/实时监控/模拟上报
+        dispatch_bar = QHBoxLayout()
+        dispatch_bar.setSpacing(6)
+        for _target, _label in (
+            ("curve", "添加到曲线图"),
+            ("monitor", "添加到实时监控"),
+            ("sim", "添加到模拟上报"),
+        ):
+            _btn = QPushButton(_label)
+            _btn.clicked.connect(
+                lambda _checked=False, t=_target: self._on_dispatch(t)
+            )
+            dispatch_bar.addWidget(_btn)
+        layout.addLayout(dispatch_bar)
+
+    def _on_dispatch(self, target: str):
+        """把搜索树中勾选的信号分发到指定目标页（曲线图/实时监控/模拟上报）"""
+        signals = self.get_checked_signals()
+        self.dispatch_requested.emit(target, signals)
 
     def load_messages(self, messages: list[MessageDef]):
         self._messages = messages
@@ -90,8 +104,29 @@ class SignalTreeWidget(QWidget):
                     result.append((msg_name, sig_item.text(0)))
         return result
 
+    def set_signal_checked(self, msg_name: str, sig_name: str, checked: bool):
+        """按 (msg_name, sig_name) 设置信号勾选状态（供已选信号列表删除时调用）"""
+        for i in range(self._tree.topLevelItemCount()):
+            msg_item = self._tree.topLevelItem(i)
+            if msg_item.text(0) != msg_name:
+                continue
+            for j in range(msg_item.childCount()):
+                sig_item = msg_item.child(j)
+                if sig_item.text(0) == sig_name:
+                    self._tree.blockSignals(True)
+                    sig_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+                    self._tree.blockSignals(False)
+                    self._on_item_changed(None, 0)
+                    return
+
     def _on_search(self, text: str):
-        """搜索报文/信号，支持名称模糊搜索和 CAN ID 十六进制搜索"""
+        """搜索报文/信号，支持名称模糊搜索和 CAN ID 十六进制搜索。
+
+        修复点：
+        - 信号名搜索不再受 hex 检测影响（如 "AEB" 既像 hex 又像信号名，
+          原逻辑会被 hex 检测劫持导致信号名搜不到）；
+        - 报文名 / CAN ID 命中时，展开该报文并显示其下全部信号，便于勾选。
+        """
         text = text.strip()
         if not text:
             # 搜索框清空：显示所有项并折叠
@@ -105,12 +140,13 @@ class SignalTreeWidget(QWidget):
 
         text_lower = text.lower()
 
-        # 判断是否为十六进制 ID 搜索
+        # 判断是否为十六进制 ID 搜索（仅用于报文 ID 匹配，不影响信号名搜索）
         is_hex_search = False
         search_id = 0
+        search_hex = ""
         try:
-            hex_str = text.replace("0x", "").replace("0X", "")
-            search_id = int(hex_str, 16)
+            search_hex = text.replace("0x", "").replace("0X", "")
+            search_id = int(search_hex, 16)
             is_hex_search = True
         except ValueError:
             pass
@@ -121,47 +157,38 @@ class SignalTreeWidget(QWidget):
             msg_id_text = msg_item.text(1).lower()  # "0x1a0" 等
             msg_def = msg_item.data(0, Qt.UserRole)
 
-            # 按名称匹配
+            # 按名称匹配（始终生效）
             name_match = text_lower in msg_name
-            # 按 ID 匹配 — 支持模糊搜索（如 "1A" 匹配 "0x1A0"、"0x1A1" 等）
+            # 按 ID 匹配 — 支持精确与模糊（如 "1A" 匹配 "0x1A0"、"0x1A1"）
             id_match = False
             if is_hex_search and msg_def:
-                # 精确匹配
                 if msg_def.frame_id == search_id:
                     id_match = True
-                # 模糊匹配：搜索文本是 hex ID 的子串
-                else:
+                elif search_hex:
                     msg_hex = f"{msg_def.frame_id:03X}".lower()
-                    search_hex = text.replace("0x", "").replace("0X", "").lower()
                     id_match = search_hex in msg_hex
             elif text_lower in msg_id_text:
                 id_match = True
 
-            msg_visible = name_match or id_match
+            msg_matched = name_match or id_match
             any_sig_visible = False
 
             for j in range(msg_item.childCount()):
                 sig_item = msg_item.child(j)
                 sig_name = sig_item.text(0).lower()
-                # ID 搜索时不匹配信号名（信号没有 ID）
-                sig_visible = (text_lower in sig_name) if not is_hex_search else False
+                # 信号名始终参与搜索；报文名/ID 命中时展开显示其下全部信号
+                sig_visible = (text_lower in sig_name) or msg_matched
                 sig_item.setHidden(not sig_visible)
                 if sig_visible:
                     any_sig_visible = True
 
-            msg_item.setHidden(not (msg_visible or any_sig_visible))
-            if any_sig_visible or (msg_visible and text):
+            msg_item.setHidden(not (msg_matched or any_sig_visible))
+            if msg_matched or any_sig_visible:
                 msg_item.setExpanded(True)
-            elif not text:
-                msg_item.setExpanded(False)
 
     def _on_item_changed(self, item, column):
         checked = self.get_checked_signals()
-        self._plot_btn.setEnabled(len(checked) > 0)
         self.selection_changed.emit(checked)
-
-    def _on_plot_clicked(self):
-        self.plot_requested.emit()
 
     def _on_select_all(self):
         """全选当前报文下所有可见信号"""

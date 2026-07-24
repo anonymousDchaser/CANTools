@@ -1,10 +1,10 @@
 """DBC 文件解析封装，基于 cantools 库"""
-import cantools
+from core.can_utils import load_dbc_database
 from core.can_data import SignalDef, MessageDef
 
 
 def parse_dbc(file_path: str) -> list[MessageDef]:
-    db = cantools.database.load_file(file_path)
+    db = load_dbc_database(file_path)
     messages = []
     for msg in db.messages:
         signals = []

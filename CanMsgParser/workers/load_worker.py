@@ -1,6 +1,7 @@
 # workers/load_worker.py
 """QThread 工作线程：文件加载和信号解码"""
 import cantools
+from core.can_utils import load_dbc_database
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from core.can_data import MessageDef, DecodedSignal
@@ -63,7 +64,7 @@ class DecodeWorker(QThread):
                     self.finished.emit(ds)
                 return
 
-            db = cantools.database.load_file(self._dbc_path)
+            db = load_dbc_database(self._dbc_path)
             msg_def = db.get_message_by_name(self._msg_name)
             mask = self._frame_index["arbitration_id"] == msg_def.frame_id
             matched = self._frame_index[mask]

@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QRect, QSize
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
 import cantools
+from core.can_utils import load_dbc_database
 from core.can_data import MessageDef
 
 
@@ -389,7 +390,7 @@ class MessageTableWidget(QWidget):
 
         if dbc_path:
             try:
-                self._db = cantools.database.load_file(dbc_path)
+                self._db = load_dbc_database(dbc_path)
             except Exception:
                 self._db = None
 
@@ -420,7 +421,7 @@ class MessageTableWidget(QWidget):
         self._dbc_path = dbc_path
         if dbc_path:
             try:
-                self._db = cantools.database.load_file(dbc_path)
+                self._db = load_dbc_database(dbc_path)
             except Exception:
                 self._db = None
 
@@ -569,7 +570,7 @@ class MessageTableWidget(QWidget):
         # 如果 DBC 数据库未加载但路径已设置，尝试重新加载
         if self._db is None and self._dbc_path:
             try:
-                self._db = cantools.database.load_file(self._dbc_path)
+                self._db = load_dbc_database(self._dbc_path)
             except Exception as e:
                 child = QTreeWidgetItem(item)
                 child.setText(1, f"(DBC 加载失败: {e})")

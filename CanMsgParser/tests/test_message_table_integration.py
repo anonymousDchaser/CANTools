@@ -160,7 +160,6 @@ class TestMainWindowIntegration:
             messages = parse_dbc(dbc_path)
             window._messages = messages
             window._dbc_path = dbc_path
-            window._signal_tree.load_messages(messages)
             window._bit_layout.load_messages(messages)
             window._group_panel.set_messages(messages)
             window._message_table.update_dbc(dbc_path)
@@ -231,7 +230,6 @@ class TestMainWindowIntegration:
             messages = parse_dbc(dbc_path)
             window._messages = messages
             window._dbc_path = dbc_path
-            window._signal_tree.load_messages(messages)
             window._bit_layout.load_messages(messages)
             window._group_panel.set_messages(messages)
             window._message_table.update_dbc(dbc_path)

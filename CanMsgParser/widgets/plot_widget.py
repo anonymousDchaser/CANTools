@@ -120,6 +120,14 @@ class PlotWidget(QWidget):
         self._pinned_annotations: dict = {}
         # Issue 2: 实时坐标显示文本对象（每个 axes 一个）
         self._coord_texts: dict = {}
+        # ─── 实时曲线模式（用于信号实时监控页） ───
+        self._realtime: bool = False
+        self._rt_meta: list = []                 # [(msg_name, sig_name), ...] 有序
+        self._rt_buffers: dict = {}              # key -> {"t": list, "v": list}
+        self._rt_lines: dict = {}                # key -> matplotlib Line2D
+        self._rt_axes: dict = {}                 # key -> 所属 axes
+        self._rt_max_points: int = 5000          # 滚动窗口最大点数
+        self._rt_t0: float = 0.0                 # 实时监控起始时间（用于相对时间轴）
 
         self.setStyleSheet(self._QSS)
         self._setup_ui()
@@ -206,6 +214,12 @@ class PlotWidget(QWidget):
         self._fig.clear()
         self._fig.patch.set_facecolor("#1e1e2e")
 
+        # 实时模式：根据缓冲数据构建坐标轴与曲线
+        if self._realtime and self._rt_meta:
+            self._build_realtime()
+            self._canvas.draw()
+            return
+
         if not self._signals:
             ax = self._fig.add_subplot(111)
             ax.set_facecolor("#1e1e2e")
@@ -233,6 +247,130 @@ class PlotWidget(QWidget):
             self._coord_texts[id(ax)] = txt
 
         self._canvas.draw()
+
+    # ────────────────────── 实时曲线模式 ──────────────────────
+
+    def start_realtime(self, meta: list):
+        """进入实时监控模式，准备绘制给定信号列表。
+
+        Args:
+            meta: [(msg_name, sig_name), ...] 信号的绘制顺序
+        """
+        self._realtime = True
+        self._rt_meta = list(meta)
+        self._rt_buffers = {
+            (m, s): {"t": [], "v": []} for (m, s) in meta
+        }
+        self._rt_lines = {}
+        self._rt_axes = {}
+        self._rt_t0 = 0.0
+        self._redraw()
+
+    def push_sample(self, msg_name: str, sig_name: str, t: float, v: float):
+        """推送一个实时采样点。
+
+        必须在 GUI 线程调用（由监控页通过信号槽从后台线程转发）。
+        """
+        if not self._realtime:
+            return
+        key = (msg_name, sig_name)
+        buf = self._rt_buffers.get(key)
+        if buf is None:
+            return
+
+        # 以首个样本时间为时间轴起点，避免数值过大影响显示
+        if self._rt_t0 == 0.0 and not buf["t"]:
+            self._rt_t0 = t
+        rel_t = t - self._rt_t0
+
+        buf["t"].append(rel_t)
+        buf["v"].append(v)
+        # 滚动窗口截断
+        if len(buf["t"]) > self._rt_max_points:
+            overflow = len(buf["t"]) - self._rt_max_points
+            del buf["t"][:overflow]
+            del buf["v"][:overflow]
+
+        line = self._rt_lines.get(key)
+        if line is not None:
+            line.set_data(buf["t"], buf["v"])
+            # 自动缩放（基于当前缓冲边界，即滚动窗口）
+            ax = self._rt_axes.get(key)
+            if ax is not None:
+                ax.relim()
+                ax.autoscale_view(scalex=True, scaley=True)
+            self._canvas.draw_idle()
+
+    def stop_realtime(self):
+        """退出实时模式，保留最后一次画面"""
+        self._realtime = False
+        self._rt_buffers = {}
+        self._rt_lines = {}
+        self._rt_axes = {}
+
+    def _build_realtime(self):
+        """根据实时缓冲构建坐标轴与空曲线（模式切换时复用）"""
+        self._rt_lines = {}
+        self._rt_axes = {}
+
+        if self._subplot_mode:
+            n = len(self._rt_meta)
+            axes = self._fig.subplots(n, 1, sharex=True)
+            if n == 1:
+                axes = [axes]
+            for i, (msg_name, sig_name) in enumerate(self._rt_meta):
+                ax = axes[i]
+                ax.set_facecolor("#1e1e2e")
+                color = COLORS[i % len(COLORS)]
+                label = f"{msg_name}.{sig_name}"
+                line, = ax.plot([], [], color=color, linewidth=self._original_linewidth,
+                                marker="o", markersize=2, label=label, alpha=0.9)
+                ax.set_title(label, loc="left", fontsize=9, color=color, pad=2)
+                ax.grid(True, linestyle="--", alpha=0.4, color="#3a3a4e")
+                legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
+                legend.get_frame().set_edgecolor("#3a3a4e")
+                self._rt_lines[(msg_name, sig_name)] = line
+                self._rt_axes[(msg_name, sig_name)] = ax
+            axes[-1].set_xlabel("时间 (s)", fontsize=11)
+        else:
+            ax = self._fig.add_subplot(111)
+            ax.set_facecolor("#1e1e2e")
+            ax.set_xlabel("时间 (s)", fontsize=11)
+            ax.set_ylabel("物理值", fontsize=11)
+            ax.grid(True, linestyle="--", alpha=0.4, color="#3a3a4e")
+            for i, (msg_name, sig_name) in enumerate(self._rt_meta):
+                color = COLORS[i % len(COLORS)]
+                label = f"{msg_name}.{sig_name}"
+                line, = ax.plot([], [], color=color, linewidth=self._original_linewidth,
+                                marker="o", markersize=2, label=label, alpha=0.9)
+                self._rt_lines[(msg_name, sig_name)] = line
+                self._rt_axes[(msg_name, sig_name)] = ax
+            legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
+            legend.get_frame().set_edgecolor("#3a3a4e")
+
+        # 用缓冲数据初始化曲线（模式切换时保留已有数据），再按轴自适应
+        _seen_axes = set()
+        for key, line in self._rt_lines.items():
+            buf = self._rt_buffers.get(key)
+            if buf and buf["t"]:
+                line.set_data(buf["t"], buf["v"])
+        for key, ax in self._rt_axes.items():
+            if id(ax) in _seen_axes:
+                continue
+            ax.relim()
+            ax.autoscale_view(scalex=True, scaley=True)
+            _seen_axes.add(id(ax))
+
+        self._fig.tight_layout(pad=2.0)
+
+        # Issue 2: 为每个 axes 创建实时坐标显示文本
+        self._coord_texts.clear()
+        for ax in self._fig.axes:
+            txt = ax.text(0.01, 0.01, "", transform=ax.transAxes,
+                          fontsize=8, color="#aaaaaa", va="bottom", ha="left",
+                          bbox=dict(boxstyle="round,pad=0.2", facecolor="#1e1e2e",
+                                    edgecolor="none", alpha=0.7))
+            self._coord_texts[id(ax)] = txt
 
     def _draw_shared(self):
         """共享 Y 轴模式"""

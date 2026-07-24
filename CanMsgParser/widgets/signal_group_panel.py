@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
+from widgets.signal_tree import SignalTreeWidget
 
 
 @dataclass
@@ -38,10 +39,12 @@ class SignalGroup:
 class SignalGroupPanel(QWidget):
     """信号分组管理面板，嵌入曲线图 Tab 内"""
 
-    # 发射已勾选的信号列表 [(msg_name, sig_name), ...]
-    plot_requested = pyqtSignal(list)
+    # 组内勾选状态变化时发射（参数为当前分组已勾选的信号列表）
+    checked_changed = pyqtSignal(list)
     # 用户保存分组配置时发射文件路径（用于主窗口记住路径）
     config_saved = pyqtSignal(str)
+    # 分发信号到曲线图/实时监控/模拟上报页：(target, [(msg_name, sig_name), ...])
+    dispatch_requested = pyqtSignal(str, list)
 
     # ─── QSS 样式表（与设计系统一致） ───
     _QSS = """
@@ -170,6 +173,19 @@ class SignalGroupPanel(QWidget):
         group_bar.addStretch()
         layout.addLayout(group_bar)
 
+        # ─── 内嵌信号搜索树（公共搜索入口，自带分发按钮）───
+        self._embed_tree = SignalTreeWidget()
+        # 搜索树的分发信号直接转发给本面板的 dispatch_requested
+        self._embed_tree.dispatch_requested.connect(self.dispatch_requested)
+        layout.addWidget(self._embed_tree, stretch=2)
+
+        # 把搜索树中勾选的信号加入当前分组
+        self._add_tree_to_group_btn = QPushButton("加入分组")
+        self._add_tree_to_group_btn.setProperty("class", "primary")
+        self._add_tree_to_group_btn.setToolTip("将上方搜索树中勾选的信号加入当前分组")
+        self._add_tree_to_group_btn.clicked.connect(self._add_tree_to_group)
+        layout.addWidget(self._add_tree_to_group_btn)
+
         # ─── 信号列表 ───
         self._sig_list = QListWidget()
         self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -179,11 +195,6 @@ class SignalGroupPanel(QWidget):
         # ─── 操作按钮栏 ───
         action_bar = QHBoxLayout()
         action_bar.setSpacing(8)
-
-        self._add_from_tree_btn = QPushButton("从信号树添加")
-        self._add_from_tree_btn.setToolTip("将信号树中勾选的信号添加到当前分组")
-        self._add_from_tree_btn.clicked.connect(self._add_from_tree)
-        action_bar.addWidget(self._add_from_tree_btn)
 
         self._remove_btn = QPushButton("移除选中")
         self._remove_btn.setToolTip("从当前分组中移除选中的信号")
@@ -203,36 +214,43 @@ class SignalGroupPanel(QWidget):
         action_bar.addStretch()
         layout.addLayout(action_bar)
 
-        # ─── 绘图按钮（主要操作） ───
-        self._plot_btn = QPushButton("📈 绘制当前分组曲线")
-        self._plot_btn.setProperty("class", "primary")
-        self._plot_btn.setStyleSheet("""
-            QPushButton[class="primary"] {
-                padding: 10px;
-                font-size: 14px;
-                border-radius: 6px;
-            }
-        """)
-        self._plot_btn.setToolTip("使用当前分组中已勾选的信号绘制曲线")
-        self._plot_btn.clicked.connect(self._on_plot)
-        layout.addWidget(self._plot_btn)
+        # ─── 分组内信号分发按钮（作用于分组中已勾选的信号）───
+        group_dispatch_bar = QHBoxLayout()
+        group_dispatch_bar.setSpacing(6)
+        for _target, _label in (
+            ("curve", "添加到曲线图"),
+            ("monitor", "添加到实时监控"),
+            ("sim", "添加到模拟上报"),
+        ):
+            _btn = QPushButton(_label)
+            _btn.clicked.connect(
+                lambda _checked=False, t=_target: self._on_group_dispatch(t)
+            )
+            group_dispatch_bar.addWidget(_btn)
+        layout.addLayout(group_dispatch_bar)
+
+        # 勾选变化通知（供曲线图/实时监控/模拟上报页联动）
+        self._sig_list.itemChanged.connect(self._on_sig_checked)
 
     # ────────────────────── 公共接口 ──────────────────────
 
     def set_messages(self, messages: list[MessageDef]):
-        """更新当前 DBC 报文定义，用于匹配检查"""
+        """更新当前 DBC 报文定义，用于匹配检查，并同步给内嵌搜索树"""
         self._messages = messages
+        self._embed_tree.load_messages(messages)
         self._refresh_signal_list()
 
-    def add_signals_from_tree(self, signals: list[tuple[str, str, str]]):
-        """从信号树批量添加信号到当前分组。
+    def add_signals(self, signals: list[tuple[str, str, str]]):
+        """批量添加信号到当前分组（由各页的"添加到分组"按钮调用）。
 
         Args:
             signals: [(msg_name, sig_name, frame_id_hex), ...]
         """
+        # 若还没有任何分组，自动创建一个默认分组，避免无目标可添加
         if self._current_group_idx < 0:
-            QMessageBox.information(self, "提示", "请先创建或选择一个分组")
-            return
+            self._groups.append(SignalGroup(name="默认分组"))
+            self._refresh_combo()
+            self._group_combo.setCurrentIndex(0)
 
         group = self._groups[self._current_group_idx]
         existing = {(s.msg_name, s.sig_name) for s in group.signals}
@@ -246,6 +264,12 @@ class SignalGroupPanel(QWidget):
         idx = self._current_group_idx
         self._group_combo.setItemText(idx, f"{group.name} ({len(group.signals)} 信号)")
 
+    def get_current_group_name(self) -> str:
+        """返回当前选中分组名称，无分组时返回空字符串"""
+        if 0 <= self._current_group_idx < len(self._groups):
+            return self._groups[self._current_group_idx].name
+        return ""
+
     def get_checked_signals(self) -> list[tuple[str, str]]:
         """返回当前分组中已勾选的 (msg_name, sig_name) 列表"""
         result = []
@@ -255,6 +279,30 @@ class SignalGroupPanel(QWidget):
                 sig_ref = item.data(Qt.UserRole)
                 result.append((sig_ref.msg_name, sig_ref.sig_name))
         return result
+
+    # ────────────────────── 分发 / 添加 ──────────────────────
+
+    def _add_tree_to_group(self):
+        """把内嵌搜索树中勾选的信号加入当前分组"""
+        checked = self._embed_tree.get_checked_signals()
+        if not checked:
+            QMessageBox.information(self, "提示", "请先在搜索树中勾选信号")
+            return
+        msg_lookup = {m.name: m for m in self._messages}
+        signals = []
+        for msg_name, sig_name in checked:
+            msg = msg_lookup.get(msg_name)
+            frame_id_hex = f"0x{msg.frame_id:03X}" if msg else ""
+            signals.append((msg_name, sig_name, frame_id_hex))
+        self.add_signals(signals)
+
+    def _on_group_dispatch(self, target: str):
+        """把分组中已勾选的信号分发到指定目标页"""
+        checked = self.get_checked_signals()
+        if not checked:
+            QMessageBox.information(self, "提示", "请先在分组中勾选要发送的信号")
+            return
+        self.dispatch_requested.emit(target, checked)
 
     # ────────────────────── 分组管理 ──────────────────────
 
@@ -296,8 +344,11 @@ class SignalGroupPanel(QWidget):
 
     def _refresh_signal_list(self):
         """刷新信号列表，检查 DBC 匹配状态"""
+        # 构建期间屏蔽勾选信号，避免刷新触发 checked_changed 误报
+        self._sig_list.blockSignals(True)
         self._sig_list.clear()
         if self._current_group_idx < 0:
+            self._sig_list.blockSignals(False)
             return
 
         group = self._groups[self._current_group_idx]
@@ -327,12 +378,18 @@ class SignalGroupPanel(QWidget):
                 item.setForeground(QColor("#555560"))
 
             self._sig_list.addItem(item)
+        self._sig_list.blockSignals(False)
 
     # ────────────────────── 信号操作 ──────────────────────
 
-    def _add_from_tree(self):
-        """从信号树添加 — 由 main_window 连接处理"""
-        pass  # main_window 连接此按钮到信号树的 get_checked_signals
+    def _on_sig_checked(self, item):
+        """组内信号勾选变化：通知外部页面联动刷新
+
+        注意：_sig_list 是 QListWidget，其 itemChanged 信号仅发射 (item)
+        一个参数，因此本槽只接收 item（不要加 column 参数，否则勾选时会
+        抛出 "missing 1 required positional argument: 'column'"）。
+        """
+        self.checked_changed.emit(self.get_checked_signals())
 
     def _remove_selected(self):
         """移除选中的信号"""
@@ -365,12 +422,6 @@ class SignalGroupPanel(QWidget):
             item = self._sig_list.item(i)
             if item.flags() & Qt.ItemIsUserCheckable:
                 item.setCheckState(Qt.Unchecked)
-
-    def _on_plot(self):
-        """绘制当前分组曲线"""
-        checked = self.get_checked_signals()
-        if checked:
-            self.plot_requested.emit(checked)
 
     # ────────────────────── 配置文件保存/加载 ──────────────────────
 
