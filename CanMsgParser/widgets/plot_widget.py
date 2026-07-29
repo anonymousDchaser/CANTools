@@ -121,7 +121,8 @@ class PlotWidget(QWidget):
         # Issue 2: 实时坐标显示文本对象（每个 axes 一个）
         self._coord_texts: dict = {}
         # ─── 实时曲线模式（用于信号实时监控页） ───
-        self._realtime: bool = False
+        self._realtime: bool = False            # 是否处于实时模式（停止后保留以保留画面）
+        self._rt_running: bool = False           # 是否正在接收实时采样（停止后为 False 不再收数）
         self._rt_meta: list = []                 # [(msg_name, sig_name), ...] 有序
         self._rt_buffers: dict = {}              # key -> {"t": list, "v": list}
         self._rt_lines: dict = {}                # key -> matplotlib Line2D
@@ -254,26 +255,29 @@ class PlotWidget(QWidget):
         """进入实时监控模式，准备绘制给定信号列表。
 
         Args:
-            meta: [(msg_name, sig_name), ...] 信号的绘制顺序
+            meta: [(frame_id, msg_name, sig_name), ...]，frame_id 为报文 ID
+                  （int，可为 None），用于图例展示如 "TCU_3.TCU_Drivemode(0x112)"
         """
         self._realtime = True
+        self._rt_running = True
         self._rt_meta = list(meta)
         self._rt_buffers = {
-            (m, s): {"t": [], "v": []} for (m, s) in meta
+            (f, m, s): {"t": [], "v": []} for (f, m, s) in meta
         }
         self._rt_lines = {}
         self._rt_axes = {}
         self._rt_t0 = 0.0
         self._redraw()
 
-    def push_sample(self, msg_name: str, sig_name: str, t: float, v: float):
+    def push_sample(self, frame_id, msg_name: str, sig_name: str, t: float, v: float):
         """推送一个实时采样点。
 
         必须在 GUI 线程调用（由监控页通过信号槽从后台线程转发）。
+        frame_id 用于与 start_realtime 传入的 meta 三元组键匹配。
         """
-        if not self._realtime:
+        if not self._rt_running:
             return
-        key = (msg_name, sig_name)
+        key = (frame_id, msg_name, sig_name)
         buf = self._rt_buffers.get(key)
         if buf is None:
             return
@@ -302,11 +306,14 @@ class PlotWidget(QWidget):
             self._canvas.draw_idle()
 
     def stop_realtime(self):
-        """退出实时模式，保留最后一次画面"""
-        self._realtime = False
-        self._rt_buffers = {}
-        self._rt_lines = {}
-        self._rt_axes = {}
+        """退出实时模式，保留最后一次画面。
+
+        仅停止接收新采样（_rt_running=False），但保留 _realtime 状态、
+        _rt_meta 与 _rt_buffers，使「停止监控」后点击「切换共享Y轴/独立子图」
+        时仍能用已缓冲的数据重绘曲线，而不至于回退到「请勾选信号」占位图。
+        """
+        self._rt_running = False
+        # 不清除 _realtime / _rt_meta / _rt_buffers，保留最后一次绘制结果
 
     def _build_realtime(self):
         """根据实时缓冲构建坐标轴与空曲线（模式切换时复用）"""
@@ -318,19 +325,20 @@ class PlotWidget(QWidget):
             axes = self._fig.subplots(n, 1, sharex=True)
             if n == 1:
                 axes = [axes]
-            for i, (msg_name, sig_name) in enumerate(self._rt_meta):
+            for i, (frame_id, msg_name, sig_name) in enumerate(self._rt_meta):
                 ax = axes[i]
                 ax.set_facecolor("#1e1e2e")
                 color = COLORS[i % len(COLORS)]
-                label = f"{msg_name}.{sig_name}"
+                label = (f"{msg_name}.{sig_name}(0x{frame_id:03X})"
+                         if frame_id is not None else f"{msg_name}.{sig_name}")
                 line, = ax.plot([], [], color=color, linewidth=self._original_linewidth,
                                 marker="o", markersize=2, label=label, alpha=0.9)
                 ax.set_title(label, loc="left", fontsize=9, color=color, pad=2)
                 ax.grid(True, linestyle="--", alpha=0.4, color="#3a3a4e")
                 legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
                 legend.get_frame().set_edgecolor("#3a3a4e")
-                self._rt_lines[(msg_name, sig_name)] = line
-                self._rt_axes[(msg_name, sig_name)] = ax
+                self._rt_lines[(frame_id, msg_name, sig_name)] = line
+                self._rt_axes[(frame_id, msg_name, sig_name)] = ax
             axes[-1].set_xlabel("时间 (s)", fontsize=11)
         else:
             ax = self._fig.add_subplot(111)
@@ -338,13 +346,14 @@ class PlotWidget(QWidget):
             ax.set_xlabel("时间 (s)", fontsize=11)
             ax.set_ylabel("物理值", fontsize=11)
             ax.grid(True, linestyle="--", alpha=0.4, color="#3a3a4e")
-            for i, (msg_name, sig_name) in enumerate(self._rt_meta):
+            for i, (frame_id, msg_name, sig_name) in enumerate(self._rt_meta):
                 color = COLORS[i % len(COLORS)]
-                label = f"{msg_name}.{sig_name}"
+                label = (f"{msg_name}.{sig_name}(0x{frame_id:03X})"
+                         if frame_id is not None else f"{msg_name}.{sig_name}")
                 line, = ax.plot([], [], color=color, linewidth=self._original_linewidth,
                                 marker="o", markersize=2, label=label, alpha=0.9)
-                self._rt_lines[(msg_name, sig_name)] = line
-                self._rt_axes[(msg_name, sig_name)] = ax
+                self._rt_lines[(frame_id, msg_name, sig_name)] = line
+                self._rt_axes[(frame_id, msg_name, sig_name)] = ax
             legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
             legend.get_frame().set_edgecolor("#3a3a4e")
 

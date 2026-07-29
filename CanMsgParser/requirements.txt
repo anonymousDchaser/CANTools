@@ -7,5 +7,6 @@ numpy>=1.21
 openpyxl>=3.0
 xlrd==1.2.0       # 1.2.0 是最后一个支持 .xls (OLE2) 格式的版本
 lxml>=4.9       # pd.read_html 依赖，用于读取 HTML 表格伪装的 .xls 文件
+uptime          # PEAK(PCAN) 后端依赖，缺失时时间戳基于开机而非 UTC，并有 stderr 警告
 pytest>=7.0
 pyinstaller>=5.0    # 仅打包用，运行时不需要

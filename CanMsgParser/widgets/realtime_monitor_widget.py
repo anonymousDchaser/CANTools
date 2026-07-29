@@ -16,7 +16,8 @@ from PyQt5.QtCore import Qt
 
 from widgets.plot_widget import PlotWidget
 from workers.can_capture_worker import CanCaptureWorker
-from core.can_utils import DEFAULT_CHANNEL, DEFAULT_BITRATE
+from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE)
+from core.can_connection import CanConnectionManager
 from core.can_data import MessageDef
 
 
@@ -27,10 +28,12 @@ class RealtimeMonitorWidget(QWidget):
         super().__init__(parent)
         self._messages: list[MessageDef] = []
         self._dbc_path: str = ""
+        self._interface_type = DEFAULT_INTERFACE_TYPE
         self._channel = DEFAULT_CHANNEL
         self._bitrate = DEFAULT_BITRATE
         self._capture_worker: CanCaptureWorker | None = None
         self._monitoring = False
+        self._manager: CanConnectionManager | None = None  # 进程内共享连接
         self._sel_signals: set = set()  # {(msg_name, sig_name)}
         self._setup_ui()
 
@@ -98,10 +101,15 @@ class RealtimeMonitorWidget(QWidget):
     def set_dbc_path(self, dbc_path: str):
         self._dbc_path = dbc_path
 
-    def set_connection(self, channel: str, bitrate: int):
-        """由「连接状态」页注入通道与波特率（本页不再自带控件）"""
+    def set_connection(self, interface_type: str, channel: str, bitrate: int):
+        """由「连接状态」页注入设备类型/通道/波特率（本页不再自带控件）"""
+        self._interface_type = interface_type
         self._channel = channel
         self._bitrate = bitrate
+
+    def set_connection_manager(self, manager: CanConnectionManager):
+        """注入进程内共享连接管理器（总线由它统一持有，本页只取用不自建）"""
+        self._manager = manager
 
     def set_value_descriptions(self, descriptions: dict):
         """透传 DBC 值描述给实时曲线，使悬停注释显示枚举含义"""
@@ -147,25 +155,44 @@ class RealtimeMonitorWidget(QWidget):
         if not self._dbc_path:
             QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
             return
+        if not self._messages:
+            QMessageBox.warning(self, "提示", "请先加载 DBC 文件（报文定义缺失）")
+            return
         if not self._sel_signals:
             QMessageBox.warning(self, "提示", "请先通过「信号分组」窗添加要监控的信号")
             return
+        if self._manager is None:
+            QMessageBox.critical(self, "监控错误", "连接管理器未初始化")
+            return
 
-        checked = list(self._sel_signals)
-        self._plot.start_realtime(checked)
-        self._capture_worker = CanCaptureWorker(
-            self._dbc_path, checked, self._channel, self._bitrate
+        # 通过共享管理器建立/复用唯一总线（未连则自动连接，避免“忘了点连接”）
+        bus, err = self._manager.ensure_connected(
+            self._interface_type, self._channel, self._bitrate
         )
-        self._capture_worker.sample_received.connect(self._on_sample)
-        self._capture_worker.status_changed.connect(self._on_status)
-        self._capture_worker.error_occurred.connect(self._on_error)
-        self._capture_worker.start()
+        if bus is None:
+            QMessageBox.critical(self, "监控错误", err)
+            return
+
+        checked = list(self._sel_signals)  # [(msg_name, sig_name)] 给解码 worker
+        meta = [(self._frame_id_of(m), m, s) for (m, s) in self._sel_signals]
+        self._plot.start_realtime(meta)
+        self._capture_worker = CanCaptureWorker(self._dbc_path, checked)
+        self._capture_worker.sample_received.connect(self._on_sample, Qt.QueuedConnection)
+        self._capture_worker.status_changed.connect(self._on_status, Qt.QueuedConnection)
+        self._capture_worker.error_occurred.connect(self._on_error, Qt.QueuedConnection)
+        if not self._capture_worker.start_monitoring():
+            self._capture_worker = None
+            return
+        # 注册为共享总线的收帧监听者（管理器唯一收帧线程会把每帧 fan-out 过来）
+        self._manager.add_listener(self._capture_worker.process_message)
 
         self._monitoring = True
         self._start_btn.setText("■ 停止监控")
 
     def _stop_monitoring(self):
-        if self._capture_worker is not None:
+        if self._capture_worker is not None and self._manager is not None:
+            # 注销收帧监听者（无监听者时管理器自动停收帧线程）；共享总线不自关
+            self._manager.remove_listener(self._capture_worker.process_message)
             self._capture_worker.stop()
             self._capture_worker = None
         self._plot.stop_realtime()
@@ -175,8 +202,15 @@ class RealtimeMonitorWidget(QWidget):
 
     # ────────────────────── 信号回调 ──────────────────────
 
-    def _on_sample(self, msg_name: str, sig_name: str, t: float, v: float):
-        self._plot.push_sample(msg_name, sig_name, t, v)
+    def _frame_id_of(self, msg_name: str) -> int | None:
+        """从已加载的报文定义中反查报文 ID（用于图例展示）"""
+        for m in self._messages:
+            if m.name == msg_name:
+                return m.frame_id
+        return None
+
+    def _on_sample(self, frame_id: int, msg_name: str, sig_name: str, t: float, v: float):
+        self._plot.push_sample(frame_id, msg_name, sig_name, t, v)
 
     def _on_status(self, text: str):
         self._status_label.setText(text)

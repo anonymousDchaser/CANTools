@@ -7,3 +7,17 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# 构建日志与临时备份（build.py 的改名备份策略会生成这些）
+*.log
+_diag.log
+*.bak_*
+build.bak_*
+dist.bak_*
+build_bak*/
+dist_bak*/
+oldversion*/
+WB101.json
+
+# 调试脚本（临时排查用，不应入库）
+tests/_dbg.py

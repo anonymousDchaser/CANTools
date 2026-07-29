@@ -281,6 +281,8 @@ class MessageTableWidget(QWidget):
         self._db = None  # cantools Database
         self._filtered_index: pd.DataFrame | None = None
         self._byte_change_info: dict = {}  # {frame_id: {byte_idx: frames_since_change}}
+        # {sig_name: {int_val: "描述"}}，来自 DBC+Excel 合并（主窗口派发）
+        self._value_descriptions: dict = {}
 
         self.setStyleSheet(self._QSS)
         self._setup_ui()
@@ -352,7 +354,16 @@ class MessageTableWidget(QWidget):
 
         # ─── 树形表格 ───
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["序号", "时间(s)", "ID", "DLC", "Channel", "Data (Hex)"])
+        # 表头为父子分层语义：顶层=帧信息，子项（展开的信号）= 信号详情。
+        # 十六进制值在十进制值左侧（满足「左侧增加显示16进制」的诉求）。
+        self._tree.setHeaderLabels([
+            "序号",
+            "时间(s) / 信号名",
+            "ID / 十六进制值",
+            "DLC / 十进制值",
+            "Channel / 单位",
+            "Data(Hex) / 信号描述",
+        ])
         self._tree.setColumnCount(6)
         self._tree.setAlternatingRowColors(True)
         self._tree.setRootIsDecorated(True)
@@ -364,9 +375,9 @@ class MessageTableWidget(QWidget):
         header.setStretchLastSection(True)
         header.resizeSection(0, 70)
         header.resizeSection(1, 200)  # 时间列 — 加宽以显示完整时间戳
-        header.resizeSection(2, 90)
-        header.resizeSection(3, 55)
-        header.resizeSection(4, 70)
+        header.resizeSection(2, 110)  # 十六进制值（子项）
+        header.resizeSection(3, 110)  # 十进制值（子项）
+        header.resizeSection(4, 80)   # 单位（子项）
 
         # 在填充数据前连接展开信号，确保展开时能触发解码
         self._tree.itemExpanded.connect(self._on_item_expanded)
@@ -606,21 +617,91 @@ class MessageTableWidget(QWidget):
                 child.setForeground(1, QColor("#ef5350"))
                 return
             decoded = msg_def.decode(frame_data)
+            # 原始（未缩放、未映射枚举名）解码，用于十六进制列与信号描述查表
+            raw_decoded = self._decode_raw(self._db, arb_id, frame_data)
 
             for sig_name, sig_value in decoded.items():
                 sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
                 unit = sig_def.unit if sig_def and sig_def.unit else ""
+                raw_val = raw_decoded.get(sig_name)
                 child = QTreeWidgetItem(item)
                 child.setText(0, "")
                 child.setText(1, sig_name)
-                child.setText(5, f"{sig_value} {unit}")
+                child.setText(2, self._raw_to_hex(raw_val))          # 十六进制值（左侧）
+                child.setText(3, self._val_to_text(sig_value))        # 十进制值（+枚举名）
+                child.setText(4, unit)                                # 单位
+                child.setText(5, self._desc_of(arb_id, sig_name, raw_val))  # 信号描述
                 # 子项用不同颜色区分
                 child.setForeground(1, QColor("#4fc3f7"))
-                child.setForeground(5, QColor("#66bb6a"))
+                child.setForeground(2, QColor("#ffd54f"))
+                child.setForeground(3, QColor("#66bb6a"))
+                child.setForeground(5, QColor("#ba9ffb"))
         except Exception as e:
             child = QTreeWidgetItem(item)
             child.setText(1, f"(解码失败: {e})")
             child.setForeground(1, QColor("#ef5350"))
+
+    # ────────────────────── 信号值展示增强（十六进制 + 描述） ──────────────────────
+
+    @staticmethod
+    def _val_to_text(val) -> str:
+        """把信号值格式化为文本；枚举信号显示『数值 (枚举名)』。"""
+        if val is None:
+            return ""
+        if hasattr(val, "name") and hasattr(val, "value"):
+            return f"{val.value} ({val.name})"
+        return str(val)
+
+    @staticmethod
+    def _raw_to_hex(val) -> str:
+        """把信号的原始（未缩放）整数值格式化为十六进制字符串。"""
+        if val is None:
+            return ""
+        try:
+            return f"0x{int(val):X}"
+        except (ValueError, TypeError):
+            return ""
+
+    def _decode_raw(self, db, arb_id: int, data: bytes) -> dict:
+        """解码出每个信号的原始（未缩放、未映射枚举名）整数值，用于十六进制列与描述查表。"""
+        try:
+            msg = db.get_message_by_frame_id(arb_id)
+            decoded = msg.decode(data, decode_choices=False, scaling=False)
+            return dict(decoded)
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _desc_of(self, arb_id: int, sig_name: str, raw_val) -> str:
+        """返回某信号当前原始值对应的描述（DBC choices 优先，Excel 补充）。
+
+        cantools 42 的 signal.choices 值是 NamedSignalValue（str 子类），
+        PyQt5 setText 拒绝 str 子类，故所有返回值统一 str() 归一化。
+        """
+        if raw_val is None:
+            return ""
+        try:
+            key = int(raw_val)
+        except (ValueError, TypeError):
+            return ""
+        desc = self._value_descriptions.get(sig_name, {}).get(key)
+        if desc:
+            return str(desc)
+        if self._db is not None:
+            try:
+                msg = self._db.get_message_by_frame_id(arb_id)
+                for s in msg.signals:
+                    if s.name == sig_name and s.choices:
+                        choice = s.choices.get(key)
+                        if choice is not None:
+                            return str(choice)
+            except Exception:  # noqa: BLE001
+                pass
+        return ""
+
+    def set_value_descriptions(self, descriptions: dict):
+        """接收 DBC+Excel 合并的值描述 {sig_name: {int_val: 描述}}，
+        用于报文树展开后的『信号描述』列。"""
+        self._value_descriptions = descriptions or {}
 
     # ────────────────────── 过滤逻辑 ──────────────────────
 

@@ -2,7 +2,8 @@
 """信号树组件：展示 DBC 中的报文和信号，支持搜索和勾选"""
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLineEdit, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QHBoxLayout,
+    QPushButton, QHBoxLayout, QListWidget, QListWidgetItem,
+    QAbstractItemView, QLabel, QCheckBox,
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
@@ -31,6 +32,22 @@ class SignalTreeWidget(QWidget):
         self._search_input.textChanged.connect(self._on_search)
         layout.addWidget(self._search_input)
 
+        # 全选 / 取消全选 勾选框（操作当前可见信号；相当于原「全选当前/取消全选」按钮）
+        sel_bar = QHBoxLayout()
+        sel_bar.setSpacing(8)
+        self._check_all_chk = QCheckBox("全选")
+        self._check_all_chk.stateChanged.connect(
+            lambda _s: self._on_check_all(self._check_all_chk.isChecked())
+        )
+        self._uncheck_all_chk = QCheckBox("取消全选")
+        self._uncheck_all_chk.stateChanged.connect(
+            lambda _s: self._on_uncheck_all(self._uncheck_all_chk.isChecked())
+        )
+        sel_bar.addWidget(self._check_all_chk)
+        sel_bar.addWidget(self._uncheck_all_chk)
+        sel_bar.addStretch()
+        layout.addLayout(sel_bar)
+
         # 树形列表
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["名称", "ID/类型"])
@@ -38,20 +55,6 @@ class SignalTreeWidget(QWidget):
         self._tree.setAlternatingRowColors(True)
         self._tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self._tree)
-
-        # 按钮栏
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(6)
-
-        # 次要操作按钮
-        self._select_all_btn = QPushButton("全选当前")
-        self._select_all_btn.clicked.connect(self._on_select_all)
-        btn_layout.addWidget(self._select_all_btn)
-
-        self._deselect_all_btn = QPushButton("取消全选")
-        self._deselect_all_btn.clicked.connect(self._on_deselect_all)
-        btn_layout.addWidget(self._deselect_all_btn)
-        layout.addLayout(btn_layout)
 
         # 分发按钮栏：将搜索树中勾选的信号发送到曲线图/实时监控/模拟上报
         dispatch_bar = QHBoxLayout()
@@ -67,6 +70,28 @@ class SignalTreeWidget(QWidget):
             )
             dispatch_bar.addWidget(_btn)
         layout.addLayout(dispatch_bar)
+
+        # ─── 当前已勾选信号显示（跨搜索持久、可单独移除）───
+        checked_label = QLabel("已勾选信号（跨搜索保留）:")
+        checked_label.setStyleSheet("color: #9090a0; font-weight: 500;")
+        layout.addWidget(checked_label)
+
+        self._checked_list = QListWidget()
+        self._checked_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._checked_list.setAlternatingRowColors(True)
+        self._checked_list.setMinimumHeight(90)
+        self._checked_list.setToolTip(
+            "当前已勾选（含因搜索被隐藏）的信号；可在此移除，会同步取消搜索树中的勾选"
+        )
+        layout.addWidget(self._checked_list)
+
+        checked_remove_bar = QHBoxLayout()
+        self._checked_remove_btn = QPushButton("移除选中")
+        self._checked_remove_btn.setToolTip("从已勾选列表中移除，并同步取消搜索树中的勾选")
+        self._checked_remove_btn.clicked.connect(self._on_remove_checked)
+        checked_remove_bar.addWidget(self._checked_remove_btn)
+        checked_remove_bar.addStretch()
+        layout.addLayout(checked_remove_bar)
 
     def _on_dispatch(self, target: str):
         """把搜索树中勾选的信号分发到指定目标页（曲线图/实时监控/模拟上报）"""
@@ -92,6 +117,7 @@ class SignalTreeWidget(QWidget):
                 sig_item.setCheckState(0, Qt.Unchecked)
                 sig_item.setData(0, Qt.UserRole, sig)
         self._tree.blockSignals(False)
+        self._refresh_checked_list()
 
     def get_checked_signals(self) -> list[tuple[str, str]]:
         result = []
@@ -188,33 +214,59 @@ class SignalTreeWidget(QWidget):
 
     def _on_item_changed(self, item, column):
         checked = self.get_checked_signals()
+        self._refresh_checked_list()
         self.selection_changed.emit(checked)
 
-    def _on_select_all(self):
-        """全选当前报文下所有可见信号"""
-        current = self._tree.currentItem()
-        if current is None:
-            return
-        if current.parent() is not None:
-            msg_item = current.parent()
-        else:
-            msg_item = current
-        self._tree.blockSignals(True)
-        for j in range(msg_item.childCount()):
-            sig_item = msg_item.child(j)
-            if not sig_item.isHidden():
-                sig_item.setCheckState(0, Qt.Checked)
-        self._tree.blockSignals(False)
-        self._on_item_changed(None, 0)
+    def _refresh_checked_list(self):
+        """刷新『已勾选信号』列表（与搜索树勾选状态双向同步）。
 
-    def _on_deselect_all(self):
-        """取消全部信号勾选"""
+        该列表展示所有已勾选信号，含因搜索被隐藏的项，使用户清楚看到
+        “当前到底勾选了哪些”，避免在重新搜索后误把旧勾选项一并添加。
+        """
+        self._checked_list.blockSignals(True)
+        self._checked_list.clear()
+        for msg_name, sig_name in self.get_checked_signals():
+            item = QListWidgetItem(f"{sig_name}  ({msg_name})")
+            item.setData(Qt.UserRole, (msg_name, sig_name))
+            self._checked_list.addItem(item)
+        self._checked_list.blockSignals(False)
+
+    def _on_remove_checked(self):
+        """从已勾选列表中移除选中项，并同步取消搜索树中的对应勾选。
+
+        即使目标信号因当前搜索被隐藏，set_signal_checked 仍会遍历所有项
+        找到并取消其勾选，随后触发的 _on_item_changed 会刷新本列表。
+        """
+        pairs = [item.data(Qt.UserRole) for item in self._checked_list.selectedItems()]
+        for msg_name, sig_name in pairs:
+            self.set_signal_checked(msg_name, sig_name, False)
+
+    def _on_check_all(self, checked: bool):
+        """勾选「全选」：勾选当前所有可见信号（与「全选当前」等价）。"""
+        if not checked:
+            return  # 取消动作交给「取消全选」勾选框负责
+        self._set_visible_checked(True)
+        self._uncheck_all_chk.blockSignals(True)
+        self._uncheck_all_chk.setChecked(False)
+        self._uncheck_all_chk.blockSignals(False)
+
+    def _on_uncheck_all(self, checked: bool):
+        """勾选「取消全选」：取消当前所有可见信号的勾选。"""
+        if not checked:
+            return
+        self._set_visible_checked(False)
+        self._check_all_chk.blockSignals(True)
+        self._check_all_chk.setChecked(False)
+        self._check_all_chk.blockSignals(False)
+
+    def _set_visible_checked(self, checked: bool):
+        """批量设置当前可见（未隐藏）的信号项勾选状态。"""
         self._tree.blockSignals(True)
         for i in range(self._tree.topLevelItemCount()):
             msg_item = self._tree.topLevelItem(i)
             for j in range(msg_item.childCount()):
                 sig_item = msg_item.child(j)
-                if sig_item.flags() & Qt.ItemIsUserCheckable:
-                    sig_item.setCheckState(0, Qt.Unchecked)
+                if not sig_item.isHidden():
+                    sig_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
         self._tree.blockSignals(False)
         self._on_item_changed(None, 0)

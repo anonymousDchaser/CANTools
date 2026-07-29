@@ -18,6 +18,7 @@ import can
 
 from core.can_utils import (
     connect_bus, load_dbc, build_signal_slots, group_by_frame, encode_frame,
+    DEVICE_TYPES,
 )
 
 
@@ -31,10 +32,12 @@ class CanSimWorker(QThread):
     def __init__(self, dbc_path: str, signals: list,
                  values: dict, ramp_config: dict,
                  period: float = 1.0,
+                 interface_type: str = "peak",
                  channel: str = "PCAN_USBBUS1", bitrate: int = 500000):
         super().__init__()
         self._dbc_path = dbc_path
         self._signals = signals
+        self._interface_type = interface_type
         self._channel = channel
         self._bitrate = bitrate
         self._period = max(period, 0.01)
@@ -47,7 +50,7 @@ class CanSimWorker(QThread):
 
     def run(self):
         self._running = True
-        bus, err = connect_bus(self._channel, self._bitrate)
+        bus, err = connect_bus(self._interface_type, self._channel, self._bitrate)
         if bus is None:
             self.error_occurred.emit(err)
             return
@@ -70,8 +73,11 @@ class CanSimWorker(QThread):
                 cur = {k: float(v) for k, v in self._values.items()}
             ramp_cur = dict(cur)  # 递增状态在循环间持续累积，不能每周期重置
 
+            dev_label = DEVICE_TYPES.get(self._interface_type, {}).get(
+                "label", self._interface_type
+            )
             self.status_changed.emit(
-                f"已连接 PCAN，模拟上报 {len(self._signals)} 个信号，"
+                f"已连接 {dev_label}，模拟上报 {len(self._signals)} 个信号，"
                 f"周期 {self._period:.2f}s"
             )
 
