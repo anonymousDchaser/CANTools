@@ -11,6 +11,13 @@ def main():
     # 高 DPI 支持
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # 缩放比例使用精确值（不取整），避免分辨率/缩放变化后输入映射与渲染比例
+    # 不一致导致的鼠标点击错位
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except Exception:
+        pass
 
     app = QApplication(sys.argv)
 

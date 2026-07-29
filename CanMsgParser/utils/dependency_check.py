@@ -17,6 +17,7 @@ REQUIRED_PACKAGES = [
     ("openpyxl", "openpyxl"),
     ("xlrd", "xlrd==1.2.0"),  # 固定 1.2.0 支持 .xls
     ("lxml", "lxml"),
+    ("uptime", "uptime"),  # PEAK(PCAN) 后端所需，缺失会报 uptime library not available
 ]
 
 

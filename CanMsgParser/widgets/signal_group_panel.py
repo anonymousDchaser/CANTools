@@ -133,7 +133,20 @@ class SignalGroupPanel(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        # ─── 分组选择栏 ───
+        # ─── 内嵌信号搜索树（公共搜索入口，自带分发按钮）───
+        self._embed_tree = SignalTreeWidget()
+        # 搜索树的分发信号直接转发给本面板的 dispatch_requested
+        self._embed_tree.dispatch_requested.connect(self.dispatch_requested)
+        layout.addWidget(self._embed_tree, stretch=4)
+
+        # 把搜索树中勾选的信号加入当前分组
+        self._add_tree_to_group_btn = QPushButton("加入分组")
+        self._add_tree_to_group_btn.setProperty("class", "primary")
+        self._add_tree_to_group_btn.setToolTip("将上方搜索树中勾选的信号加入当前分组")
+        self._add_tree_to_group_btn.clicked.connect(self._add_tree_to_group)
+        layout.addWidget(self._add_tree_to_group_btn)
+
+        # ─── 分组选择栏（移到搜索树与“加入分组”按钮下方）───
         group_bar = QHBoxLayout()
         group_bar.setSpacing(8)
 
@@ -173,23 +186,11 @@ class SignalGroupPanel(QWidget):
         group_bar.addStretch()
         layout.addLayout(group_bar)
 
-        # ─── 内嵌信号搜索树（公共搜索入口，自带分发按钮）───
-        self._embed_tree = SignalTreeWidget()
-        # 搜索树的分发信号直接转发给本面板的 dispatch_requested
-        self._embed_tree.dispatch_requested.connect(self.dispatch_requested)
-        layout.addWidget(self._embed_tree, stretch=2)
-
-        # 把搜索树中勾选的信号加入当前分组
-        self._add_tree_to_group_btn = QPushButton("加入分组")
-        self._add_tree_to_group_btn.setProperty("class", "primary")
-        self._add_tree_to_group_btn.setToolTip("将上方搜索树中勾选的信号加入当前分组")
-        self._add_tree_to_group_btn.clicked.connect(self._add_tree_to_group)
-        layout.addWidget(self._add_tree_to_group_btn)
-
         # ─── 信号列表 ───
         self._sig_list = QListWidget()
         self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._sig_list.setAlternatingRowColors(True)
+        self._sig_list.setMaximumHeight(160)
         layout.addWidget(self._sig_list, stretch=1)
 
         # ─── 操作按钮栏 ───

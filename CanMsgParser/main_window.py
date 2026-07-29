@@ -2,6 +2,8 @@
 """主窗口：Tab 布局（曲线图含信号树子面板 + 报文表格 + 位图查看器）+ 菜单栏 + 状态栏 + 专业暗色主题"""
 import json
 import os
+import sys
+import ctypes
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -9,7 +11,7 @@ from PyQt5.QtWidgets import (
     QStatusBar, QProgressBar, QMessageBox, QLabel, QApplication,
     QPushButton, QListWidget, QListWidgetItem, QAbstractItemView,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QEvent, QTimer
 import pandas as pd
 import numpy as np
 from core.dbc_parser import parse_dbc
@@ -23,9 +25,10 @@ from widgets.message_table import MessageTableWidget
 from widgets.bit_layout_view import BitLayoutView
 from widgets.realtime_monitor_widget import RealtimeMonitorWidget
 from widgets.signal_sim_widget import SignalSimWidget
+from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
-from utils.excel_value_loader import load_value_descriptions
+from utils.excel_value_loader import load_signal_value_db, load_value_descriptions
 
 # 配置文件路径，用于记住上次加载的 DBC 文件
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".canmsgparser_config.json")
@@ -291,6 +294,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        # 进程内共享的 CAN 连接管理器：模拟上报/实时监控/实时报文三页共用
+        self._conn_manager = CanConnectionManager(self)
         self.setWindowTitle("CAN 报文分析工具")
         self.setMinimumSize(1280, 720)
         self.resize(1920, 1280)
@@ -311,7 +316,8 @@ class MainWindow(QMainWindow):
         self._dbc_path: str = ""
         self._excel_path: str = ""  # Excel 值描述文件路径（用于配置持久化）
         self._group_config_path: str = ""  # 分组配置文件路径（用于配置持久化）
-        self._excel_value_descriptions: dict = {}  # Excel 加载的值描述
+        self._excel_value_descriptions: dict = {}  # Excel 加载的枚举值描述
+        self._value_db: dict = {}  # Excel 加载的富值库（含枚举/范围/精度等）
         self._value_descriptions: dict = {}  # {sig_name: {int_val: "描述", ...}}
         self._frame_index: pd.DataFrame | None = None
         self._raw_data: np.ndarray | None = None
@@ -357,6 +363,73 @@ class MainWindow(QMainWindow):
                 self._statusbar.showMessage(f"已自动加载分组配置: {last_group}")
             except Exception:
                 pass
+
+        # ── 运行时分辨率 / 缩放变化自适应（修复改分辨率后鼠标点击错位）──
+        self._hidpi_pending = False
+        self._install_hidpi_handlers()
+
+    # ─────────────────────────────────────────────────────────────
+    # 高 DPI / 分辨率变化自适应
+    # 分辨率或缩放改变后，Qt 会缓存旧的 devicePixelRatio，导致鼠标事件仍按
+    # 旧比例映射，表现为点击位置整体错位。此处监听系统变化并强制刷新窗口缩放比例。
+    # ─────────────────────────────────────────────────────────────
+    def _install_hidpi_handlers(self):
+        app = QApplication.instance()
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            screen.logicalDotsPerInchChanged.connect(self._on_dpi_changed)
+        if app is not None:
+            app.primaryScreenChanged.connect(self._on_primary_screen_changed)
+
+    def _on_dpi_changed(self, _dpi):
+        self._schedule_hidpi_refresh()
+
+    def _on_primary_screen_changed(self, screen):
+        if screen is not None:
+            try:
+                screen.logicalDotsPerInchChanged.connect(self._on_dpi_changed)
+            except Exception:
+                pass
+        self._schedule_hidpi_refresh()
+
+    def _schedule_hidpi_refresh(self):
+        if self._hidpi_pending:
+            return
+        self._hidpi_pending = True
+        QTimer.singleShot(120, self._refresh_hidpi)
+
+    def _refresh_hidpi(self):
+        """重建平台窗口以重新读取当前缩放比例，修复改分辨率/缩放后的点击错位。"""
+        self._hidpi_pending = False
+        wh = self.windowHandle()
+        if wh is not None:
+            # 尽力触发 Qt 的屏幕变更事件（ScreenChangeInternal=2462）刷新缓存比例
+            try:
+                QApplication.postEvent(wh, QEvent(2462))
+            except Exception:
+                pass
+        # 隐藏后再重建窗口是可靠刷新 devicePixelRatio 的方式，保留窗口状态与位置
+        state = self.windowState()
+        geo = self.geometry()
+        self.hide()
+        QTimer.singleShot(0, lambda: self._restore_after_hidpi(state, geo))
+
+    def _restore_after_hidpi(self, state, geo):
+        self.setGeometry(geo)
+        self.show()
+        self.setWindowState(state)
+        self.updateGeometry()
+
+    def nativeEvent(self, eventType, message):
+        # 仅 Windows：分辨率变更时系统向所有顶层窗口广播 WM_DISPLAYCHANGE(0x007E)
+        if sys.platform == "win32" and eventType == b"windows_generic_MSG":
+            try:
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == 0x007E:  # WM_DISPLAYCHANGE
+                    self._schedule_hidpi_refresh()
+            except Exception:
+                pass
+        return super().nativeEvent(eventType, message)
 
     def _setup_ui(self):
         """构建主界面布局：Tab 页（曲线图 / 报文表格 / 模拟上报信号 /
@@ -447,13 +520,20 @@ class MainWindow(QMainWindow):
         self._bit_layout = BitLayoutView()
         self._tabs.addTab(self._bit_layout, "🔢 位图查看器")
 
+        # 共享连接管理器注入三页（模拟上报/实时监控/实时报文）+ 连接状态页
+        self._conn_widget.set_connection_manager(self._conn_manager)
+        self._sim_widget.set_connection_manager(self._conn_manager)
+        self._monitor_widget.set_connection_manager(self._conn_manager)
+        self._realtime_msg_widget.set_connection_manager(self._conn_manager)
+
         # 连接状态页信号接线
         self._conn_widget.dbc_load_requested.connect(self._load_dbc)
         self._conn_widget.excel_load_requested.connect(self._load_excel_descriptions)
         self._conn_widget.log_load_requested.connect(self._load_log)
         self._conn_widget.connection_changed.connect(self._on_connection_changed)
-        # 初始把连接页的通道/波特率推送给各硬件页（不触发连接）
+        # 初始把连接页的设备类型/通道/波特率推送给各硬件页（不触发连接）
         self._on_connection_changed(
+            self._conn_widget.get_interface_type(),
             self._conn_widget.get_channel(),
             self._conn_widget.get_bitrate(),
             False,
@@ -478,10 +558,10 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetClosable
         )
         self._group_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        # 初始停靠在左侧（可在「视图」菜单浮动 / 关闭 / 重新打开）
+        # 初始停靠在左侧（构造期保持停靠，依附主窗口，避免成为独立顶层窗
+        # 口在 main_window.show() 之前闪现）。首次显示后在 showEvent 中再
+        # 由 _position_group_dock 浮出到主窗口左侧外部。
         self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
-        # 首次显示后再尝试浮动到主窗口左侧外部（_position_group_dock）
-        self._group_dock.setFloating(True)
 
     def _setup_menu(self):
         """构建菜单栏"""
@@ -574,6 +654,8 @@ class MainWindow(QMainWindow):
             self._monitor_widget.set_dbc_path(path)
             self._sim_widget.set_messages(self._messages)
             self._sim_widget.set_dbc_path(path)
+            # 同步 Excel 矩阵值库（若已加载），使模拟值下拉立即可用
+            self._sim_widget.set_value_db(getattr(self, "_value_db", {}))
             # 实时报文页 / 连接状态页同步
             self._realtime_msg_widget.set_dbc_path(path)
             self._conn_widget.set_dbc_path(path)
@@ -602,14 +684,19 @@ class MainWindow(QMainWindow):
                 desc[sig_name] = dict(values)
 
         # DBC 值描述覆盖 Excel（DBC 优先）
+        # 注意：cantools 42 的 signal.choices 值是 NamedSignalValue(str 子类)，
+        # 需转成普通 str，避免下游 setText/格式化时依赖其子类特性。
         for msg in self._messages:
             for sig in msg.signals:
                 if sig.choices:
-                    desc[sig.name] = sig.choices
+                    desc[sig.name] = {int(k): str(v)
+                                      for k, v in sig.choices.items()}
 
         self._value_descriptions = desc
         self._plot_widget.set_value_descriptions(desc)
         self._monitor_widget.set_value_descriptions(desc)
+        self._realtime_msg_widget.set_value_descriptions(desc)
+        self._message_table.set_value_descriptions(desc)
         # 同步 Excel 值描述到位图查看器
         self._bit_layout.set_value_descriptions(self._excel_value_descriptions)
 
@@ -674,13 +761,16 @@ class MainWindow(QMainWindow):
         """信号分组窗分发按钮回调：把信号送到对应目标页（曲线图/实时监控/模拟上报）"""
         if target == "curve":
             self._add_curve_signals(signals)
+            self._tabs.setCurrentIndex(1)  # 跳转到曲线图
         elif target == "monitor":
             self._monitor_widget.add_selected_signals(signals)
+            self._tabs.setCurrentIndex(4)  # 跳转到实时监控
         elif target == "sim":
             self._sim_widget.add_selected_signals(signals)
+            self._tabs.setCurrentIndex(3)  # 跳转到模拟上报
 
     def _add_curve_signals(self, signals: list):
-        """把分发的信号加入曲线图已选集合（去重）；加入即绘图"""
+        """把分发的信号加入曲线图已选集合（去重）；不自动绘制，绘制由用户点击「绘制」按钮触发"""
         added = False
         for msg_name, sig_name in signals:
             if (msg_name, sig_name) not in self._curve_signals:
@@ -688,8 +778,6 @@ class MainWindow(QMainWindow):
                 added = True
         if added:
             self._refresh_curve_list()
-            # 加入即绘图
-            self._decode_and_plot_curve()
 
     def _refresh_curve_list(self):
         """刷新曲线图「已选信号」列表（按 (msg_name, sig_name) 去重）"""
@@ -753,15 +841,33 @@ class MainWindow(QMainWindow):
                 f"绘图完成: {len(self._decoded_signals)} 个信号"
             )
 
-    def _on_connection_changed(self, channel: str, bitrate: int, connected: bool):
-        """连接状态页通道/波特率/连接状态变化：推送给各硬件页"""
-        self._monitor_widget.set_connection(channel, bitrate)
-        self._sim_widget.set_connection(channel, bitrate)
-        self._realtime_msg_widget.set_connection(channel, bitrate)
-        if connected:
-            self._realtime_msg_widget.start_capture(channel, bitrate)
-        else:
-            self._realtime_msg_widget.stop_capture()
+    def _on_connection_changed(self, interface_type: str, channel: str,
+                               bitrate: int, connected: bool):
+        """连接状态页设备类型/通道/波特率/连接状态变化：推送给各硬件页。
+
+        - 配置始终下发给三页（模拟上报/实时监控/实时报文），三页共用进程内
+          唯一一条总线（由 CanConnectionManager 持有），避免 PEAK 同一通道
+          进程内重复 Initialize 失败（"A PCAN Channel has not been initialized yet"）。
+        - 断开时统一停止三页的收/发；连接状态页「断开 CAN」会先发此信号，
+          再由管理器真正 shutdown 共享总线。
+        """
+        self._monitor_widget.set_connection(interface_type, channel, bitrate)
+        self._sim_widget.set_connection(interface_type, channel, bitrate)
+        self._realtime_msg_widget.set_connection(interface_type, channel, bitrate)
+        if not connected:
+            # 停止三页的收/发，避免共享总线被关闭时仍有线程在用
+            try:
+                self._sim_widget.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._monitor_widget.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._realtime_msg_widget.stop_capture()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _position_group_dock(self):
         """将分组窗浮动到主窗口左侧外部（空间不足则停靠回左侧）"""
@@ -860,6 +966,8 @@ class MainWindow(QMainWindow):
         self._monitor_widget.set_dbc_path(path)
         self._sim_widget.set_messages(self._messages)
         self._sim_widget.set_dbc_path(path)
+        # 同步 Excel 矩阵值库（若已加载），使模拟值下拉立即可用
+        self._sim_widget.set_value_db(getattr(self, "_value_db", {}))
         # 实时报文页 / 连接状态页同步
         self._realtime_msg_widget.set_dbc_path(path)
         self._conn_widget.set_dbc_path(path)
@@ -893,10 +1001,16 @@ class MainWindow(QMainWindow):
             auto: True 表示自动加载（启动时），False 表示用户手动操作。
                   当 auto=True 且失败时仍会抛出异常，由调用方处理展示。
         """
-        self._excel_value_descriptions = load_value_descriptions(path)
+        self._value_db = load_signal_value_db(path)
+        # 兼容曲线/监控页：仅取枚举部分
+        self._excel_value_descriptions = {
+            n: dict(i.raw_choices) for n, i in self._value_db.items()
+        }
         self._excel_path = path
         self._conn_widget.set_excel_path(path)
         self._build_value_descriptions()
+        # 把富值库喂给模拟上报页（枚举下拉 + 范围边界 mock 立即可见）
+        self._sim_widget.set_value_db(self._value_db)
         count = sum(len(v) for v in self._excel_value_descriptions.values())
         prefix = "已自动加载" if auto else "加载完成"
         self._statusbar.showMessage(
@@ -944,14 +1058,22 @@ class MainWindow(QMainWindow):
     # ═══════════════════════ 拖拽支持 ═══════════════════════
 
     def closeEvent(self, event):
-        """退出前停止后台监控/模拟上报线程，避免线程悬挂"""
-        try:
-            self._monitor_widget.stop()
-        except Exception:
-            pass
+        """退出前停止各功能页并断开共享总线，避免线程悬挂/设备未释放"""
         try:
             self._sim_widget.stop()
-        except Exception:
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._monitor_widget.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._realtime_msg_widget.stop_capture()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._conn_manager.disconnect()
+        except Exception:  # noqa: BLE001
             pass
         super().closeEvent(event)
 

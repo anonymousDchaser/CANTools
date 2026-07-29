@@ -10,6 +10,7 @@
   不在多个线程间共享同一个总线对象，因此不存在跨线程持锁调用的风险。
 - 本模块的函数本身不持有全局锁，纯函数式封装。
 """
+import importlib
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -21,6 +22,53 @@ import cantools
 # 默认 PCAN-USB 通道与波特率（与参考项目 VehicleTMasterProj 一致）
 DEFAULT_CHANNEL = "PCAN_USBBUS1"
 DEFAULT_BITRATE = 500000
+
+# 支持的 CAN 设备类型 → python-can 后端映射。
+# pycan: python-can 的 interface 名；channels: 该类型可选通道列表；
+# needs:  该类型正常工作所需的驱动/依赖提示（用于 UI 与错误提示）。
+DEVICE_TYPES = {
+    "tosun": {
+        "label": "同星 (TSMaster)",
+        "pycan": "tsmaster",
+        "channels": ["0", "1"],
+        "needs": "需安装 TSMaster 软件，并将 python-can 升级到含 tsmaster 后端的版本"
+                 "（或 pip install tsmaster），且 TSMaster 应用程序已启动",
+    },
+    "peak": {
+        "label": "PEAK (PCAN)",
+        "pycan": "pcan",
+        "channels": [
+            "PCAN_USBBUS1", "PCAN_USBBUS2", "PCAN_USBBUS3", "PCAN_USBBUS4",
+        ],
+        "needs": "需安装 PEAK 驱动（PCANBasic.dll）；若提示 uptime 缺失请 pip install uptime",
+    },
+    "vector": {
+        "label": "Vector",
+        "pycan": "vector",
+        "channels": ["0", "1", "2", "3"],
+        "needs": "需安装 Vector 硬件驱动（vxlapi64.dll）与 Vector Hardware Manager",
+    },
+    "virtual": {
+        "label": "虚拟通道 (virtual)",
+        "pycan": "virtual",
+        "channels": ["virtual"],
+        "needs": "无需硬件，用于无设备时联调",
+    },
+}
+
+
+def interface_available(interface_type: str) -> bool:
+    """检测某设备类型对应的 python-can 后端是否可导入（驱动不一定就绪）。"""
+    info = DEVICE_TYPES.get(interface_type)
+    if not info:
+        return False
+    if info["pycan"] == "virtual":
+        return True
+    try:
+        importlib.import_module(f"can.interfaces.{info['pycan']}")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @dataclass
@@ -40,17 +88,46 @@ class FrameEncodeGroup:
     signals: list = field(default_factory=list)  # list[SignalSlot]
 
 
-def connect_bus(channel: str = DEFAULT_CHANNEL, bitrate: int = DEFAULT_BITRATE):
-    """连接 PCAN 硬件总线。
+DEFAULT_INTERFACE_TYPE = "peak"
+
+
+def connect_bus(interface_type: str = DEFAULT_INTERFACE_TYPE,
+                channel: str = DEFAULT_CHANNEL,
+                bitrate: int = DEFAULT_BITRATE):
+    """按设备类型连接 CAN 硬件总线。
+
+    Args:
+        interface_type: DEVICE_TYPES 中的键（tosun/peak/vector/virtual）。
+        channel:        通道标识（不同设备类型格式不同）。
+        bitrate:        波特率。
 
     Returns:
-        (bus, None) 成功； (None, error_msg) 失败。
+        (bus, None) 成功； (None, error_msg) 失败，error_msg 已带设备类型与
+        驱动/依赖提示，便于用户排查。
     """
+    info = DEVICE_TYPES.get(interface_type)
+    if info is None:
+        return None, f"未知的 CAN 设备类型: {interface_type}"
+
+    label = info["label"]
+    pycan = info["pycan"]
+    needs = info["needs"]
+
+    # 先探测后端是否可导入，给出比原始 ImportError 更友好的提示
+    if not interface_available(interface_type):
+        return None, (
+            f"{label} 连接失败：python-can 缺少 '{pycan}' 后端"
+            f"（无法导入 can.interfaces.{pycan}）。\n{needs}"
+        )
+
     try:
-        bus = can.Bus(interface="pcan", channel=channel, bitrate=bitrate)
+        if pycan == "virtual":
+            bus = can.Bus(interface="virtual", channel=channel)
+        else:
+            bus = can.Bus(interface=pycan, channel=channel, bitrate=bitrate)
         return bus, None
     except Exception as e:  # noqa: BLE001 — 硬件连接失败需向上层返回可读错误
-        return None, f"PCAN 连接失败: {e}"
+        return None, f"{label} 连接失败: {e}\n{needs}"
 
 
 # 替换符（U+FFFD）：cantools 以 errors='replace' 打开 DBC，编码不匹配时
@@ -84,12 +161,13 @@ def _db_has_cjk(db) -> bool:
 def load_dbc_database(dbc_path: str):
     """以对中文矩阵最友好的编码加载 DBC 数据库。
 
-    依次尝试 gbk / cp1252 / utf-8：优先选择解码后含有中文(CJK)且无替换符
-    的结果（中文 CAN 矩阵通常为 GBK 编码，cantools 默认的 cp1252 会把
-    「°」「分」等解码成乱码）；无中文的欧标 DBC 则回退 cp1252/utf-8。
-    全部编码尝试失败时再回退到 cantools 默认编码(cp1252)。
+    依次尝试 utf-8 / gbk / cp1252：优先选择解码后无替换符的结果。
+    utf-8 优先是因为它是超集——GBK 编码的字节在 UTF-8 严格解码下会抛异常，
+    从而自动回退到 gbk；而 UTF-8 编码的中文 DBC 若先尝试 gbk 会被误判为
+    「含 CJK 且无替换符」而错误选中，导致中文 VAL_ 描述乱码。无中文的欧标
+    DBC 则回退 cp1252。全部编码尝试失败时再回退到 cantools 默认编码(cp1252)。
     """
-    for enc in ("gbk", "cp1252", "utf-8"):
+    for enc in ("utf-8", "gbk", "cp1252"):
         try:
             db = cantools.database.load_file(dbc_path, encoding=enc)
         except Exception as e:  # noqa: BLE001
