@@ -2,23 +2,23 @@
 """信号模拟上报页（重构）：通过「连接状态」页提供的通道/波特率连接 PCAN，
 周期性发送「已选信号列表」中的信号报文。
 
-布局（参考 VehicleTMasterProj 批量上行模拟页）：
-- 左侧：已选信号列表（可删除）— 信号由「信号分组」窗分发按钮添加
-- 右侧：控制（开始/停止）+ 数值表 + 发送日志
-
-数值表列（每信号一行，可单独设置周期）：
-信号(报文) | CANID | 换算公式 | 模拟值 | 手动值 | DBC周期(ms) |
-实际周期(ms) | 自动递增 | 状态 | 详情 | 操作
+核心设计——按报文 ID 分组（修复「同帧信号互相覆盖/交替上报」）：
+- 添加信号后，表格以「报文组（顶层）+ 组内信号（子层）」的树形展示；
+  同一 CAN ID 的多个信号归入同一个报文组，不再平铺为独立行。
+- 每个报文组有【独立的发送周期】（组行上的 SpinBox 控制），组内所有信号
+  按该周期填入【同一帧】一次性编码发送，从根本上杜绝逐信号各发一帧导致
+  的取值来回切换（例如 0x3E3 的 A/B 两个信号会一起出现在同一帧里）。
+- 组级「发送/停止」按钮控制单个报文组；顶部「开始/停止模拟上报」一键控制全部。
+- 信号行不再提供「单信号模拟」按钮（那正是覆盖问题的根源），操作列改为
+  「移除该信号」；从组中移除最后一个信号时该报文组自动消失。
 
 通道/波特率不再由本页设置，统一由「连接状态」页提供（set_connection）。
-发送按 CAN ID 分组：同一报文内的多个信号聚合为一帧，按该组最小「实际周期」
-周期性编码发送；支持每信号「自动递增」与「手动值」覆盖。
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QLabel,
     QMessageBox, QAbstractItemView, QListWidget, QListWidgetItem,
-    QTableWidget, QTableWidgetItem, QDoubleSpinBox, QSpinBox, QCheckBox,
-    QLineEdit, QHeaderView, QComboBox,
+    QTableWidget, QTableWidgetItem, QSpinBox, QCheckBox,
+    QLineEdit, QHeaderView, QComboBox, QTreeWidget, QTreeWidgetItem,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
@@ -33,19 +33,16 @@ from core.can_connection import CanConnectionManager
 from core.can_data import MessageDef, SignalDef
 
 
-# 列索引
-COL_SIG = 0
-COL_CAN_ID = 1
-COL_FORMULA = 2
-COL_VALUE = 3
-COL_MANUAL = 4
-COL_DBC_CYCLE = 5
-COL_ACTUAL_CYCLE = 6
-COL_RAMP = 7
-COL_STATUS = 8
-COL_DETAIL = 9
-COL_ACTION = 10
-NUM_COLS = 11
+# 列索引（分组树：顶层=报文组，子层=信号）
+COL_SIG = 0        # 信号名 / 报文组标题
+COL_FORMULA = 1    # 换算公式 / 组信号数概览
+COL_VALUE = 2      # 模拟值下拉 / 组周期 SpinBox
+COL_MANUAL = 3     # 手动值 / —
+COL_RAMP = 4       # 自动递增 CheckBox / —
+COL_STATUS = 5     # 状态 / 组状态
+COL_DETAIL = 6     # 详情 / —
+COL_ACTION = 7     # 操作（信号：移除 / 组：发送·停止）
+NUM_COLS = 8
 
 
 class SignalSimWidget(QWidget):
@@ -62,15 +59,23 @@ class SignalSimWidget(QWidget):
         self._manager: CanConnectionManager | None = None  # 进程内共享连接
         self._sending = False
         self._sel_signals: set = set()  # {(msg_name, sig_name)}
-        # key -> 行数据
+        # key -> 信号行数据（详见 _add_signal_row）
         self._row_data: dict = {}
         # 信号名 -> Excel 矩阵值库(SignalValueInfo)，用于枚举下拉与范围 mock
         self._value_db: dict = {}
-        # CAN ID -> 组定时器； CAN ID -> 当前生效的组 key 列表（可被单信号停止移除）
-        self._group_timers: dict = {}
-        self._group_keys: dict = {}
-        # key -> 单信号定时器
-        self._single_timers: dict = {}
+        # frame_id -> 报文组信息：
+        # {
+        #   "msg_name": str,
+        #   "keys": list[(msg_name, sig_name)],
+        #   "cycle": int,            # 组周期(ms)
+        #   "timer": QTimer|None,
+        #   "sending": bool,
+        #   "item": QTreeWidgetItem,       # 组行
+        #   "cycle_spin": QSpinBox,        # 组周期控件
+        #   "status_item": QTreeWidgetItem,# 组状态单元
+        #   "send_btn": QPushButton,       # 组发送/停止按钮
+        # }
+        self._groups: dict = {}
         # 发送日志：frame_id -> 行号 / frame_id -> 已发送计数
         self._log_rows: dict = {}
         self._log_counts: dict = {}
@@ -120,30 +125,27 @@ class SignalSimWidget(QWidget):
         ctrl.addWidget(self._start_btn)
         right_layout.addLayout(ctrl)
 
-        self._value_table = QTableWidget()
+        self._value_table = QTreeWidget()
         self._value_table.setColumnCount(NUM_COLS)
-        self._value_table.verticalHeader().setDefaultSectionSize(26)
-        self._value_table.setHorizontalHeaderLabels([
-            "信号(报文)", "CANID", "换算公式", "模拟值", "手动值",
-            "DBC周期(ms)", "实际周期(ms)", "自动递增", "状态", "详情", "操作",
+        self._value_table.setRootIsDecorated(True)
+        self._value_table.setHeaderLabels([
+            "信号 / 报文组", "换算公式 / 信号数", "模拟值 / 组周期",
+            "手动值", "自动递增", "状态 / 组状态", "详情", "操作",
         ])
-        hdr = self._value_table.horizontalHeader()
+        hdr = self._value_table.header()
         hdr.setSectionResizeMode(COL_SIG, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(COL_CAN_ID, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_FORMULA, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_VALUE, QHeaderView.Interactive)
         hdr.setSectionResizeMode(COL_MANUAL, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(COL_DBC_CYCLE, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(COL_ACTUAL_CYCLE, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_RAMP, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_DETAIL, QHeaderView.Stretch)
         hdr.setSectionResizeMode(COL_ACTION, QHeaderView.Fixed)
         self._value_table.setColumnWidth(COL_SIG, 240)
-        self._value_table.setColumnWidth(COL_VALUE, 120)
+        self._value_table.setColumnWidth(COL_VALUE, 130)
         self._value_table.setColumnWidth(COL_MANUAL, 90)
         self._value_table.setColumnWidth(COL_DETAIL, 160)
-        self._value_table.setColumnWidth(COL_ACTION, 64)
+        self._value_table.setColumnWidth(COL_ACTION, 90)
         self._value_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._value_table.setAlternatingRowColors(True)
         right_layout.addWidget(self._value_table, stretch=2)
@@ -273,24 +275,51 @@ class SignalSimWidget(QWidget):
             unit = sdef.unit if sdef else ""
             dbc_cycle = self._dbc_cycle_of(frame_id) if frame_id is not None else 100
 
-            row = self._value_table.rowCount()
-            self._value_table.insertRow(row)
+            # ── 报文组：首次出现该 frame_id 时创建组行 ──
+            grp = self._groups.get(frame_id)
+            if grp is None:
+                grp_item = QTreeWidgetItem(self._value_table)
+                grp_item.setText(COL_SIG, f"📦 报文组 0x{frame_id:03X}  {msg_name}")
+                grp_item.setData(COL_SIG, Qt.UserRole, frame_id)
+                # 组周期（组内所有信号共享）
+                cycle_spin = QSpinBox()
+                cycle_spin.setRange(10, 5000)
+                cycle_spin.setValue(dbc_cycle)
+                cycle_spin.setSuffix(" ms")
+                cycle_spin.valueChanged.connect(
+                    lambda _v, f=frame_id: self._on_group_cycle_changed(f)
+                )
+                self._value_table.setItemWidget(grp_item, COL_VALUE, cycle_spin)
+                grp_status = QTreeWidgetItem(grp_item)
+                grp_status.setText(COL_STATUS, "停止")
+                grp_btn = QPushButton("发送")
+                grp_btn.setFixedHeight(22)
+                grp_btn.setStyleSheet(
+                    "QPushButton{padding:1px 4px;font-size:11px;}"
+                )
+                grp_btn.clicked.connect(
+                    lambda _checked, f=frame_id: self._toggle_group(f)
+                )
+                self._value_table.setItemWidget(grp_item, COL_ACTION, grp_btn)
+                grp = {
+                    "msg_name": msg_name, "keys": [], "cycle": dbc_cycle,
+                    "timer": None, "sending": False, "item": grp_item,
+                    "cycle_spin": cycle_spin, "status_item": grp_status,
+                    "send_btn": grp_btn,
+                }
+                self._groups[frame_id] = grp
+            grp["keys"].append(key)
 
-            name_item = QTableWidgetItem(f"{sig_name}  ({msg_name})")
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            name_item.setData(Qt.UserRole, key)
-            self._value_table.setItem(row, COL_SIG, name_item)
+            # ── 信号子行 ──
+            row = QTreeWidgetItem(grp["item"])
+            row.setText(COL_SIG, f"{sig_name}  ({msg_name})")
+            row.setData(COL_SIG, Qt.UserRole, key)
 
-            id_item = QTableWidgetItem(f"0x{frame_id:03X}" if frame_id is not None else "")
-            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
-            self._value_table.setItem(row, COL_CAN_ID, id_item)
-
-            formula_item = QTableWidgetItem(self._formula_text(sdef) if sdef else "")
-            formula_item.setFlags(formula_item.flags() & ~Qt.ItemIsEditable)
-            self._value_table.setItem(row, COL_FORMULA, formula_item)
+            row.setText(COL_FORMULA, self._formula_text(sdef) if sdef else "")
+            row.setText(COL_DETAIL, "")
+            row.setText(COL_STATUS, "停止")
 
             # 模拟值：枚举下拉（来自信号矩阵 choices）+ 「手动模拟」项。
-            # 选中枚举时按 raw 整数发送；选中「手动模拟」时启用手动值输入框。
             choices = self._choices_of(key)
             value_combo = QComboBox()
             if choices:
@@ -301,55 +330,50 @@ class SignalSimWidget(QWidget):
             value_combo.currentIndexChanged.connect(
                 lambda _i, k=key: self._on_value_mode_changed(k)
             )
-            self._value_table.setCellWidget(row, COL_VALUE, value_combo)
+            self._value_table.setItemWidget(row, COL_VALUE, value_combo)
 
             manual_edit = QLineEdit()
             manual_edit.setPlaceholderText("手动原始值(支持0x)")
-            self._value_table.setCellWidget(row, COL_MANUAL, manual_edit)
-
-            dbc_item = QTableWidgetItem(str(dbc_cycle))
-            dbc_item.setFlags(dbc_item.flags() & ~Qt.ItemIsEditable)
-            self._value_table.setItem(row, COL_DBC_CYCLE, dbc_item)
-
-            cycle_spin = QSpinBox()
-            cycle_spin.setRange(10, 5000)
-            cycle_spin.setValue(dbc_cycle)
-            cycle_spin.setSuffix(" ms")
-            self._value_table.setCellWidget(row, COL_ACTUAL_CYCLE, cycle_spin)
+            self._value_table.setItemWidget(row, COL_MANUAL, manual_edit)
 
             ramp_chk = QCheckBox()
             ramp_chk.setEnabled(hi > lo)
-            self._value_table.setCellWidget(row, COL_RAMP, ramp_chk)
+            self._value_table.setItemWidget(row, COL_RAMP, ramp_chk)
 
-            status_item = QTableWidgetItem("停止")
-            status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
-            self._value_table.setItem(row, COL_STATUS, status_item)
-
-            detail_item = QTableWidgetItem("")
-            detail_item.setFlags(detail_item.flags() & ~Qt.ItemIsEditable)
-            self._value_table.setItem(row, COL_DETAIL, detail_item)
-
-            action_btn = QPushButton("模拟")
-            action_btn.setFixedHeight(22)
-            action_btn.setMaximumWidth(60)
-            action_btn.setStyleSheet(
+            remove_btn = QPushButton("移除")
+            remove_btn.setFixedHeight(22)
+            remove_btn.setMaximumWidth(60)
+            remove_btn.setStyleSheet(
                 "QPushButton{padding:1px 4px;font-size:11px;}"
             )
-            action_btn.clicked.connect(
-                lambda _checked, k=key: self._toggle_single(k)
+            remove_btn.clicked.connect(
+                lambda _checked, k=key: self._remove_one_signal(k)
             )
-            self._value_table.setCellWidget(row, COL_ACTION, action_btn)
+            self._value_table.setItemWidget(row, COL_ACTION, remove_btn)
 
             self._row_data[key] = {
                 "sdef": sdef, "frame_id": frame_id, "unit": unit,
                 "value_combo": value_combo, "manual_edit": manual_edit,
-                "ramp_chk": ramp_chk, "cycle_spin": cycle_spin,
-                "status_item": status_item, "detail_item": detail_item,
-                "action_btn": action_btn, "timer": None,
+                "ramp_chk": ramp_chk, "status_item": row,
+                "detail_item": row, "grp_item": grp["item"],
             }
             # 初始化手动值输入框可用状态（默认选枚举时禁用）
             self._on_value_mode_changed(key)
+        self._refresh_group_summaries()
         self._refresh_sel_list()
+
+    def _refresh_group_summaries(self):
+        """刷新各报文组的「信号数」概览列，便于一眼看清组内信号。"""
+        for fid, grp in self._groups.items():
+            n = len(grp["keys"])
+            grp["item"].setText(COL_FORMULA, f"{n} 个信号")
+
+    def _on_group_cycle_changed(self, frame_id: int):
+        """组周期 SpinBox 变化时同步到组的周期值；运行中修改即时生效
+        （组 timer 每次 timeout 复用最新 grp[\"cycle\"] 作为启动间隔）。"""
+        grp = self._groups.get(frame_id)
+        if grp is not None:
+            grp["cycle"] = grp["cycle_spin"].value()
 
     def _refresh_sel_list(self):
         self._sel_list.blockSignals(True)
@@ -363,29 +387,38 @@ class SignalSimWidget(QWidget):
     def _remove_rows(self, keys: set):
         for key in keys:
             rd = self._row_data.pop(key, None)
-            # 停止该信号的单信号定时器
-            timer = self._single_timers.pop(key, None)
-            if timer is not None:
-                timer.stop()
-                timer.deleteLater()
-            # 若属于组发送，从组中移除（组空则停组定时器）
-            if rd is not None:
-                fid = rd["frame_id"]
-                gkeys = self._group_keys.get(fid)
-                if gkeys and key in gkeys:
-                    gkeys.remove(key)
-                    if not gkeys:
-                        gt = self._group_timers.pop(fid, None)
-                        if gt is not None:
-                            gt.stop()
-                            gt.deleteLater()
-                        self._group_keys.pop(fid, None)
-            # 从表格移除对应行
-            for r in range(self._value_table.rowCount()):
-                it0 = self._value_table.item(r, COL_SIG)
-                if it0 is not None and it0.data(Qt.UserRole) == key:
-                    self._value_table.removeRow(r)
-                    break
+            if rd is None:
+                continue
+            fid = rd["frame_id"]
+            grp = self._groups.get(fid)
+            if grp is not None:
+                if key in grp["keys"]:
+                    grp["keys"].remove(key)
+                # 若组正在发送且已无信号，停止并销毁组
+                if not grp["keys"]:
+                    if grp["timer"] is not None:
+                        grp["timer"].stop()
+                        grp["timer"].deleteLater()
+                    grp["sending"] = False
+                    self._groups.pop(fid, None)
+                    idx = self._value_table.indexOfTopLevelItem(grp["item"])
+                    if idx >= 0:
+                        self._value_table.takeTopLevelItem(idx)
+            # 从树中移除信号子行
+            grp_item = rd.get("grp_item")
+            if grp_item is not None:
+                for ci in range(grp_item.childCount()):
+                    child = grp_item.child(ci)
+                    if child.data(COL_SIG, Qt.UserRole) == key:
+                        grp_item.takeChild(ci)
+                        break
+        self._refresh_group_summaries()
+
+    def _remove_one_signal(self, key: tuple):
+        """信号行「移除」按钮：从所在报文组移除该信号。"""
+        self._sel_signals.discard(key)
+        self._remove_rows({key})
+        self._refresh_sel_list()
 
     def _remove_selected(self):
         keys = {item.data(Qt.UserRole) for item in self._sel_list.selectedItems()}
@@ -399,7 +432,8 @@ class SignalSimWidget(QWidget):
         self._stop_all()
         self._sel_signals.clear()
         self._row_data.clear()
-        self._value_table.setRowCount(0)
+        self._groups.clear()
+        self._value_table.clear()
         self._refresh_sel_list()
 
     # ────────────────────── 值解析与发送 ──────────────────────
@@ -509,15 +543,15 @@ class SignalSimWidget(QWidget):
             detail = self._row_data[key]["detail_item"]
             status = self._row_data[key]["status_item"]
             if not ok:
-                detail.setText(err)
-                detail.setForeground(QColor("#FF4444"))
-                status.setText("错误")
-                status.setForeground(QColor("#FF4444"))
+                detail.setText(COL_DETAIL, err)
+                detail.setForeground(COL_DETAIL, QColor("#FF4444"))
+                status.setText(COL_STATUS, "错误")
+                status.setForeground(COL_STATUS, QColor("#FF4444"))
                 continue
             sig_name = key[1]
             raw_signals[sig_name] = raw
-            detail.setText("")
-            detail.setForeground(QColor("#000000"))
+            detail.setText(COL_DETAIL, "")
+            detail.setForeground(COL_DETAIL, QColor("#000000"))
         try:
             data = msg.encode(raw_signals, scaling=False, strict=False)
             frame = can.Message(
@@ -576,18 +610,18 @@ class SignalSimWidget(QWidget):
         for key in target:
             rd = self._row_data.get(key)
             if rd is not None:
-                rd["status_item"].setText("错误")
-                rd["status_item"].setForeground(QColor("#FF4444"))
-                if not rd["detail_item"].text():
-                    rd["detail_item"].setText(err_msg[:120])
+                rd["status_item"].setText(COL_STATUS, "错误")
+                rd["status_item"].setForeground(COL_STATUS, QColor("#FF4444"))
+                if not rd["detail_item"].text(COL_DETAIL):
+                    rd["detail_item"].setText(COL_DETAIL, err_msg[:120])
 
     def _tick_group(self, frame_id: int):
-        if not self._sending or self._bus is None:
+        if self._bus is None:
             return
-        keys = self._group_keys.get(frame_id, [])
-        if not keys:
+        grp = self._groups.get(frame_id)
+        if grp is None or not grp["sending"]:
             return
-        self._send_frame(frame_id, keys)
+        self._send_frame(frame_id, grp["keys"])
 
     def _advance_ramp(self, keys: list):
         """手动模拟模式下，对手动原始值做 +1 递增（循环到 0）。
@@ -615,31 +649,19 @@ class SignalSimWidget(QWidget):
     # ────────────────────── 开始 / 停止（全部）──────────────────────
 
     def _is_sending_key(self, key) -> bool:
-        """该信号当前是否正在被模拟上报（组发送或单信号发送）。"""
-        if key in self._single_timers:
-            return True
+        """该信号当前是否正在被模拟上报（其所属报文组正在发送）。"""
         rd = self._row_data.get(key)
         if rd is None:
             return False
-        fid = rd["frame_id"]
-        return (
-            self._sending
-            and fid is not None
-            and fid in self._group_keys
-            and key in self._group_keys[fid]
-        )
-
-    def _refresh_action_button(self, key):
-        """按信号实际发送状态刷新操作列按钮文字（模拟 / 停止）。"""
-        rd = self._row_data.get(key)
-        if rd is None:
-            return
-        btn = rd.get("action_btn")
-        if isinstance(btn, QPushButton):
-            btn.setText("停止" if self._is_sending_key(key) else "模拟")
+        grp = self._groups.get(rd["frame_id"])
+        return grp is not None and grp["sending"]
 
     def _on_start_stop(self):
-        if self._sending or self._single_timers:
+        # 全局发送中，或任一报文组正在发送，都视为「正在模拟」
+        sending_any = self._sending or any(
+            g["sending"] for g in self._groups.values()
+        )
+        if sending_any:
             self._stop_all()
         else:
             self._start_all()
@@ -659,145 +681,85 @@ class SignalSimWidget(QWidget):
         self._log_rows.clear()
         self._log_counts.clear()
 
-        # 按 CAN ID 分组
-        groups: dict = {}
-        for key in self._sel_signals:
-            fid = self._row_data[key]["frame_id"]
-            if fid is None:
-                continue
-            groups.setdefault(fid, []).append(key)
-
         self._sending = True
-        for fid, keys in groups.items():
-            self._group_keys[fid] = list(keys)
-            cycle = max(min(self._row_data[k]["cycle_spin"].value() for k in keys), 10)
-            timer = QTimer(self)
-            timer.timeout.connect(lambda f=fid: self._tick_group(f))
-            timer.start(cycle)
-            self._group_timers[fid] = timer
-            for k in keys:
-                st = self._row_data[k]["status_item"]
-                is_manual = self._row_data[k]["value_combo"].currentData() == "__manual__"
-                st.setText("手动" if is_manual else "发送中")
-                st.setForeground(QColor("#44CC44"))
-                self._refresh_action_button(k)
-
+        for fid in list(self._groups.keys()):
+            self._start_group(fid)
         self._start_btn.setText("停止模拟上报")
         self._status_label.setText(
-            f"模拟上报中: {len(self._sel_signals)} 信号 / {len(groups)} CAN ID"
+            f"模拟上报中: {len(self._sel_signals)} 信号 / {len(self._groups)} 报文组"
         )
 
     def _stop_all(self):
         self._sending = False
-        for timer in self._group_timers.values():
-            timer.stop()
-            timer.deleteLater()
-        self._group_timers.clear()
-        self._group_keys.clear()
-        for timer in self._single_timers.values():
-            timer.stop()
-            timer.deleteLater()
-        self._single_timers.clear()
-        for key, rd in self._row_data.items():
-            st = rd["status_item"]
-            if st.text() in ("发送中", "手动"):
-                st.setText("停止")
-                st.setForeground(QColor("#888888"))
-            self._refresh_action_button(key)
+        for fid in list(self._groups.keys()):
+            self._stop_group(fid)
+        self._start_btn.setText("开始模拟上报")
         # 共享总线由管理器统一持有，本页停止时只释放本地引用，不 shutdown
         self._bus = None
-        self._start_btn.setText("开始模拟上报")
         self._status_label.setText("已停止")
 
-    # ────────────────────── 单信号 模拟/停止 ──────────────────────
+    # ────────────────────── 报文组 发送/停止 ──────────────────────
 
-    def _toggle_single(self, key: tuple):
-        if self._is_sending_key(key):
-            self._stop_one(key)
-        else:
-            self._start_single(key)
-
-    def _start_single(self, key: tuple):
-        if not self._dbc_path or self._dbc is None:
-            QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
+    def _toggle_group(self, frame_id: int):
+        """报文组「发送/停止」按钮：仅控制该报文组（整帧聚合发送组内信号）。"""
+        grp = self._groups.get(frame_id)
+        if grp is None:
             return
+        if grp["sending"]:
+            self._stop_group(frame_id)
+        else:
+            self._start_group(frame_id)
+
+    def _start_group(self, frame_id: int):
+        """启动单个报文组的周期发送：组内所有信号填入同一帧一次性编码发送。"""
         if not self._ensure_bus():
             return
-        rd = self._row_data.get(key)
-        if rd is None or rd["frame_id"] is None:
+        grp = self._groups.get(frame_id)
+        if grp is None or grp["sending"]:
             return
-        fid = rd["frame_id"]
-        # 若该信号仍在组发送中，先从组里移除，避免与单信号定时器重复发送
-        keys = self._group_keys.get(fid)
-        if keys and key in keys:
-            keys.remove(key)
-            if not keys:
-                timer = self._group_timers.pop(fid, None)
-                if timer is not None:
-                    timer.stop()
-                    timer.deleteLater()
-                self._group_keys.pop(fid, None)
-                if not self._group_timers:
-                    self._sending = False
-                    self._start_btn.setText("开始模拟上报")
-                    # 共享总线由管理器统一持有，本页只释放本地引用，不 shutdown
-                    self._bus = None
-                    self._status_label.setText("已停止")
+        grp["sending"] = True
+        if grp["timer"] is None:
+            timer = QTimer(self)
+            timer.timeout.connect(lambda f=frame_id: self._tick_group(f))
+            grp["timer"] = timer
+        grp["timer"].start(grp["cycle"])
+        grp["status_item"].setText(COL_STATUS, "发送中")
+        grp["status_item"].setForeground(COL_STATUS, QColor("#44CC44"))
+        grp["send_btn"].setText("停止")
+        for k in grp["keys"]:
+            rd = self._row_data.get(k)
+            if rd is not None:
+                rd["status_item"].setText(COL_STATUS, "发送中")
+                rd["status_item"].setForeground(COL_STATUS, QColor("#44CC44"))
 
-        cycle = max(rd["cycle_spin"].value(), 10)
-        timer = QTimer(self)
-        timer.timeout.connect(lambda k=key: self._tick_single(k))
-        timer.start(cycle)
-        self._single_timers[key] = timer
-        is_manual = rd["value_combo"].currentData() == "__manual__"
-        rd["status_item"].setText("手动" if is_manual else "发送中")
-        rd["status_item"].setForeground(QColor("#44CC44"))
-        rd["action_btn"].setText("停止")
-
-    def _tick_single(self, key: tuple):
-        rd = self._row_data.get(key)
-        if rd is None or self._bus is None:
+    def _stop_group(self, frame_id: int):
+        """停止单个报文组的周期发送（释放本地总线引用由全局 _stop_all 负责）。"""
+        grp = self._groups.get(frame_id)
+        if grp is None:
             return
-        self._send_frame(rd["frame_id"], [key])
+        grp["sending"] = False
+        if grp["timer"] is not None:
+            grp["timer"].stop()
+        grp["status_item"].setText(COL_STATUS, "停止")
+        grp["status_item"].setForeground(COL_STATUS, QColor("#888888"))
+        grp["send_btn"].setText("发送")
+        for k in grp["keys"]:
+            rd = self._row_data.get(k)
+            if rd is not None:
+                rd["status_item"].setText(COL_STATUS, "停止")
+                rd["status_item"].setForeground(COL_STATUS, QColor("#888888"))
+        # 若没有任何报文组在发送，复位全局状态
+        if not any(g["sending"] for g in self._groups.values()):
+            self._sending = False
+            self._start_btn.setText("开始模拟上报")
+            self._bus = None
+            self._status_label.setText("已停止")
 
-    def _stop_single(self, key: tuple):
-        timer = self._single_timers.pop(key, None)
-        if timer is not None:
-            timer.stop()
-            timer.deleteLater()
-        rd = self._row_data.get(key)
-        if rd is not None:
-            rd["status_item"].setText("停止")
-            rd["status_item"].setForeground(QColor("#888888"))
-            rd["action_btn"].setText("模拟")
-
-    def _stop_one(self, key: tuple):
-        """停止单个信号：若是单信号定时器则停定时器；若属于组发送则从组中移除。"""
-        if key in self._single_timers:
-            self._stop_single(key)
-            return
-        rd = self._row_data.get(key)
-        if rd is None:
-            return
-        fid = rd["frame_id"]
-        keys = self._group_keys.get(fid, [])
-        if key in keys:
-            keys.remove(key)
-        rd["status_item"].setText("停止")
-        rd["status_item"].setForeground(QColor("#888888"))
-        rd["action_btn"].setText("模拟")
-        if not keys:
-            timer = self._group_timers.pop(fid, None)
-            if timer is not None:
-                timer.stop()
-                timer.deleteLater()
-            self._group_keys.pop(fid, None)
-            if not self._group_timers:
-                self._sending = False
-                self._start_btn.setText("开始模拟上报")
-                # 共享总线由管理器统一持有，本页只释放本地引用，不 shutdown
-                self._bus = None
-                self._status_label.setText("已停止")
+    # ────────────────────── 说明 ──────────────────────
+    # 信号行的「移除」按钮见 _remove_one_signal；报文组行的「发送/停止」
+    # 按钮见 _toggle_group / _start_group / _stop_group。同一报文 ID 的
+    # 信号始终聚合在同一帧发送，不再提供单信号独立发送（那会导致同帧其它
+    # 信号被默认值覆盖、取值来回切换）。
 
     # ────────────────────── 回调 ──────────────────────
 
