@@ -107,7 +107,7 @@ class PlotWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._signals: list[DecodedSignal] = []
-        self._subplot_mode = False   # True=独立子图, False=共享Y轴
+        self._subplot_mode = True   # True=独立子图, False=共享Y轴（Task #6：曲线图默认独立子图）
         self._mark_mode = False      # 时间差标记模式
         self._mark_points = []       # 已放置的标记时间戳
         self._annotation = None      # 悬停注释框
@@ -145,7 +145,7 @@ class PlotWidget(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        self._mode_btn = QPushButton("切换为独立子图")
+        self._mode_btn = QPushButton("切换为共享Y轴")
         self._mode_btn.setToolTip("在共享Y轴和独立子图模式之间切换")
         self._mode_btn.clicked.connect(self._toggle_mode)
         toolbar.addWidget(self._mode_btn)

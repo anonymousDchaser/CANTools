@@ -146,12 +146,16 @@ class SignalSimWidget(QWidget):
         hdr.setSectionResizeMode(COL_DETAIL, QHeaderView.Stretch)
         hdr.setSectionResizeMode(COL_ACTION, QHeaderView.Fixed)
         self._value_table.setColumnWidth(COL_SIG, 240)
-        self._value_table.setColumnWidth(COL_VALUE, 130)
+        self._value_table.setColumnWidth(COL_VALUE, 175)
         self._value_table.setColumnWidth(COL_MANUAL, 90)
         self._value_table.setColumnWidth(COL_DETAIL, 160)
         self._value_table.setColumnWidth(COL_ACTION, 90)
         self._value_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._value_table.setAlternatingRowColors(True)
+        # Task #4：增大行高，避免「模拟值」下拉文本显示不全
+        self._value_table.setStyleSheet(
+            "QTreeWidget::item { min-height: 24px; padding: 5px 6px; }"
+        )
         right_layout.addWidget(self._value_table, stretch=2)
 
         right_layout.addWidget(QLabel("发送日志:"))
@@ -365,6 +369,8 @@ class SignalSimWidget(QWidget):
             self._on_value_mode_changed(key)
         self._refresh_group_summaries()
         self._refresh_sel_list()
+        # 新增信号不改变发送状态（未开始发送），但确保按钮与实际状态一致
+        self._refresh_send_button()
 
     def _refresh_group_summaries(self):
         """刷新各报文组的「信号数」概览列，便于一眼看清组内信号。"""
@@ -417,6 +423,8 @@ class SignalSimWidget(QWidget):
                         grp_item.takeChild(ci)
                         break
         self._refresh_group_summaries()
+        # 移除信号可能删掉正在发送的报文组，需按实际状态刷新顶部按钮
+        self._refresh_send_button()
 
     def _remove_one_signal(self, key: tuple):
         """信号行「移除」按钮：从所在报文组移除该信号。"""
@@ -701,6 +709,21 @@ class SignalSimWidget(QWidget):
         else:
             self._start_all()
 
+    def _refresh_send_button(self):
+        """按实际发送状态刷新顶部「开始/停止模拟上报」按钮（Task #2）。
+
+        状态完全由「是否有报文组正在发送」推导，避免 _sending 与实际发送
+        状态脱节——旧实现在某些路径下会让按钮显示「停止」但实际并未发送。
+
+        注意：本方法不负责清空 self._bus。self._bus 指向「连接状态」页注入的
+        共享总线（由管理器统一持有），空闲时保留引用无害，下次开始时会由
+        _ensure_bus 重新取用；若在此清空，会误伤「添加信号（尚未发送）」等
+        仅刷新按钮的调用路径（见回归测试 test_signal_sim_group）。
+        """
+        sending_any = any(g["sending"] for g in self._groups.values())
+        self._sending = sending_any
+        self._start_btn.setText("停止模拟上报" if sending_any else "开始模拟上报")
+
     def _start_all(self):
         if not self._dbc_path or self._dbc is None:
             QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
@@ -716,21 +739,17 @@ class SignalSimWidget(QWidget):
         self._log_rows.clear()
         self._log_counts.clear()
 
-        self._sending = True
         for fid in list(self._groups.keys()):
             self._start_group(fid)
-        self._start_btn.setText("停止模拟上报")
+        self._refresh_send_button()
         self._status_label.setText(
             f"模拟上报中: {len(self._sel_signals)} 信号 / {len(self._groups)} 报文组"
         )
 
     def _stop_all(self):
-        self._sending = False
         for fid in list(self._groups.keys()):
             self._stop_group(fid)
-        self._start_btn.setText("开始模拟上报")
-        # 共享总线由管理器统一持有，本页停止时只释放本地引用，不 shutdown
-        self._bus = None
+        self._refresh_send_button()
         self._status_label.setText("已停止")
 
     # ────────────────────── 报文组 发送/停止 ──────────────────────
@@ -767,8 +786,7 @@ class SignalSimWidget(QWidget):
                 rd["status_item"].setText(COL_STATUS, "发送中")
                 rd["status_item"].setForeground(COL_STATUS, QColor("#44CC44"))
         # 同步全局按钮状态：只要任一报文组在发送，顶部即显示「停止模拟上报」
-        self._sending = True
-        self._start_btn.setText("停止模拟上报")
+        self._refresh_send_button()
         self._status_label.setText(
             f"模拟上报中: {len(self._sel_signals)} 信号 / {len(self._groups)} 报文组"
         )
@@ -789,11 +807,10 @@ class SignalSimWidget(QWidget):
             if rd is not None:
                 rd["status_item"].setText(COL_STATUS, "停止")
                 rd["status_item"].setForeground(COL_STATUS, QColor("#888888"))
-        # 若没有任何报文组在发送，复位全局状态
+        # 若没有任何报文组在发送，复位全局按钮状态（_refresh_send_button 会在
+        # 「无发送」时释放本地总线引用并复位按钮文案）
+        self._refresh_send_button()
         if not any(g["sending"] for g in self._groups.values()):
-            self._sending = False
-            self._start_btn.setText("开始模拟上报")
-            self._bus = None
             self._status_label.setText("已停止")
 
     # ────────────────────── 说明 ──────────────────────
