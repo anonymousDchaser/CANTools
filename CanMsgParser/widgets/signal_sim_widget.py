@@ -30,6 +30,7 @@ from core.can_utils import (
     load_dbc, DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE,
 )
 from core.can_connection import CanConnectionManager
+from widgets.del_key_filter import DelKeyFilter
 from core.can_data import MessageDef, SignalDef
 
 
@@ -106,6 +107,9 @@ class SignalSimWidget(QWidget):
         sel_bar.addWidget(self._clear_btn)
         left_layout.addLayout(sel_bar)
         splitter.addWidget(left)
+
+        # Delete 键移除选中的已选信号（等价于「移除选中」按钮）
+        self._del_filter = DelKeyFilter(self._sel_list, self._remove_selected)
 
         # ─── 右侧：控制 + 数值表 + 日志 ───
         right = QWidget()

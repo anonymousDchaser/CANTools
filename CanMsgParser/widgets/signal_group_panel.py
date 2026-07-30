@@ -18,8 +18,10 @@ from PyQt5.QtWidgets import (
     QLineEdit,
 )
 from PyQt5.QtCore import pyqtSignal, Qt, QTimer
+from PyQt5.QtGui import QColor
 from core.can_data import MessageDef
 from widgets.signal_tree import SignalTreeWidget
+from widgets.del_key_filter import DelKeyFilter
 
 
 @dataclass
@@ -247,6 +249,9 @@ class SignalGroupPanel(QWidget):
 
         # 勾选变化通知（供曲线图/实时监控/模拟上报页联动）
         self._sig_list.itemChanged.connect(self._on_sig_checked)
+
+        # Delete 键移除选中信号（等价于「移除选中」按钮）
+        self._del_filter = DelKeyFilter(self._sig_list, self._remove_selected)
 
     # ────────────────────── 公共接口 ──────────────────────
 
