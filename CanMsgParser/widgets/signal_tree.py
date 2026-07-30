@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
+from widgets.del_key_filter import DelKeyFilter
 
 
 class SignalTreeWidget(QWidget):
@@ -84,6 +85,9 @@ class SignalTreeWidget(QWidget):
             "当前已勾选（含因搜索被隐藏）的信号；可在此移除，会同步取消搜索树中的勾选"
         )
         layout.addWidget(self._checked_list)
+
+        # Delete 键移除选中的已勾选信号（等价于「移除选中」按钮）
+        self._del_filter = DelKeyFilter(self._checked_list, self._on_remove_checked)
 
         checked_remove_bar = QHBoxLayout()
         self._checked_remove_btn = QPushButton("移除选中")

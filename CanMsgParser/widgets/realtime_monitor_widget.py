@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 from widgets.plot_widget import PlotWidget
+from widgets.del_key_filter import DelKeyFilter
 from workers.can_capture_worker import CanCaptureWorker
 from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE)
 from core.can_connection import CanConnectionManager
@@ -98,6 +99,9 @@ class RealtimeMonitorWidget(QWidget):
         splitter.setStretchFactor(1, 3)
         splitter.setSizes([300, 900])
         layout.addWidget(splitter)
+
+        # Delete 键移除选中信号（等价于「移除选中」按钮）
+        self._del_filter = DelKeyFilter(self._sel_list, self._remove_selected)
 
     # ────────────────────── 公共接口 ──────────────────────
 

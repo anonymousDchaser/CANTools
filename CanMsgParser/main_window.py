@@ -25,6 +25,7 @@ from widgets.message_table import MessageTableWidget
 from widgets.bit_layout_view import BitLayoutView
 from widgets.realtime_monitor_widget import RealtimeMonitorWidget
 from widgets.signal_sim_widget import SignalSimWidget
+from widgets.del_key_filter import DelKeyFilter
 from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
@@ -464,6 +465,9 @@ class MainWindow(QMainWindow):
         self._selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._selected_list.setAlternatingRowColors(True)
         left_layout.addWidget(self._selected_list, stretch=1)
+
+        # Delete 键移除选中的已选信号（等价于「移除选中」按钮）
+        self._del_filter = DelKeyFilter(self._selected_list, self._remove_selected_signals)
 
         sel_btn_bar = QHBoxLayout()
         self._remove_sel_btn = QPushButton("移除选中")
