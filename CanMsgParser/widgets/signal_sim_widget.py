@@ -518,16 +518,27 @@ class SignalSimWidget(QWidget):
         self._bus = bus
         return True
 
+    @staticmethod
+    def _signal_range(sig) -> tuple[int, int]:
+        """返回该信号原始值的可表示范围 [lo, hi]（根据位宽与符号位）。"""
+        length = getattr(sig, "length", 64) or 64
+        if getattr(sig, "is_signed", False):
+            return -(2 ** (length - 1)), 2 ** (length - 1) - 1
+        return 0, 2 ** length - 1
+
     def _send_frame(self, frame_id: int, keys: list):
         """编码并发送一帧（同一 CAN ID 的信号聚合）。
 
         关键修复（修复「点 A 却报 B 发送失败」的元凶）：
         cantools 的 msg.encode() 要求提供报文中【全部】信号，否则对缺失的
         信号直接抛 KeyError（异常文本恰好是被缺失的信号名）。本工具常只模拟
-        上报一帧中的部分信号，因此必须先以各信号的 offset 作为默认值填满整
-        帧，再用已选信号的原始值覆盖，最后才编码发送。这样：
-          1) 只模拟部分信号时不再因同帧其它信号而编码失败；
-          2) 真正取值非法的信号会被正确指名，不再张冠李戴。
+        上报一帧中的部分信号，因此必须先以各信号的可表示范围安全默认值填满
+        整帧，再用已选信号的原始值覆盖，最后才编码发送。
+
+        范围安全（修复 #5「can't convert negative int to unsigned」）：
+        - 默认填充值钳制进该信号 [lo, hi]，避免无符号信号被负 offset 默认填满；
+        - 已选信号原始值若超出 [lo, hi]（如无符号信号取到负值），在此给出友好
+          报错并钳制，保证整帧仍能编码发送、不再把异常抛给 cantools 崩溃。
         """
         if self._dbc is None or self._bus is None:
             return
@@ -535,23 +546,43 @@ class SignalSimWidget(QWidget):
             msg = self._dbc.get_message_by_frame_id(frame_id)
         except Exception:  # noqa: BLE001
             return
-        # 1) 先以各信号 offset 填满整帧默认值（offset 为空则用 0）
-        raw_signals = {s.name: (s.offset if s.offset else 0) for s in msg.signals}
-        # 2) 用已选信号的原始值覆盖
+        # 1) 先以各信号的可表示范围安全默认值填满整帧（负 offset 钳制为下限）
+        raw_signals = {}
+        for s in msg.signals:
+            lo, hi = self._signal_range(s)
+            dflt = int(s.offset) if s.offset else 0
+            if dflt < lo:
+                dflt = lo
+            elif dflt > hi:
+                dflt = hi
+            raw_signals[s.name] = dflt
+        # 2) 用已选信号的原始值覆盖（越界/负值做友好报错并钳制，保证整帧可编码）
         for key in keys:
             ok, raw, err = self._resolve_raw(key)
             detail = self._row_data[key]["detail_item"]
             status = self._row_data[key]["status_item"]
+            sig_name = key[1]
             if not ok:
                 detail.setText(COL_DETAIL, err)
                 detail.setForeground(COL_DETAIL, QColor("#FF4444"))
                 status.setText(COL_STATUS, "错误")
                 status.setForeground(COL_STATUS, QColor("#FF4444"))
                 continue
-            sig_name = key[1]
+            try:
+                sig = msg.get_signal_by_name(sig_name)
+                lo, hi = self._signal_range(sig)
+            except Exception:  # noqa: BLE001
+                lo, hi = 0, 2 ** 64 - 1
+            if not (lo <= raw <= hi):
+                detail.setText(COL_DETAIL, f"值 {raw} 超出可表示范围[{lo},{hi}]")
+                detail.setForeground(COL_DETAIL, QColor("#FF4444"))
+                status.setText(COL_STATUS, "错误")
+                status.setForeground(COL_STATUS, QColor("#FF4444"))
+                raw = max(lo, min(raw, hi))
+            else:
+                detail.setText(COL_DETAIL, "")
+                detail.setForeground(COL_DETAIL, QColor("#000000"))
             raw_signals[sig_name] = raw
-            detail.setText(COL_DETAIL, "")
-            detail.setForeground(COL_DETAIL, QColor("#000000"))
         try:
             data = msg.encode(raw_signals, scaling=False, strict=False)
             frame = can.Message(
@@ -731,6 +762,12 @@ class SignalSimWidget(QWidget):
             if rd is not None:
                 rd["status_item"].setText(COL_STATUS, "发送中")
                 rd["status_item"].setForeground(COL_STATUS, QColor("#44CC44"))
+        # 同步全局按钮状态：只要任一报文组在发送，顶部即显示「停止模拟上报」
+        self._sending = True
+        self._start_btn.setText("停止模拟上报")
+        self._status_label.setText(
+            f"模拟上报中: {len(self._sel_signals)} 信号 / {len(self._groups)} 报文组"
+        )
 
     def _stop_group(self, frame_id: int):
         """停止单个报文组的周期发送（释放本地总线引用由全局 _stop_all 负责）。"""

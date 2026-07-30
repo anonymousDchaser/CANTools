@@ -13,27 +13,27 @@ def test_plot_freeze_after_stop():
     from widgets.plot_widget import PlotWidget
 
     pw = PlotWidget()
-    meta = [("MsgA", "Sig1"), ("MsgA", "Sig2")]
+    meta = [(0x100, "MsgA", "Sig1"), (0x100, "MsgA", "Sig2")]
     pw.start_realtime(meta)
 
     # 推送若干采样点
     for i in range(10):
-        pw.push_sample("MsgA", "Sig1", float(i), float(i))
-        pw.push_sample("MsgA", "Sig2", float(i), float(i) * 2)
+        pw.push_sample(0x100, "MsgA", "Sig1", float(i), float(i))
+        pw.push_sample(0x100, "MsgA", "Sig2", float(i), float(i) * 2)
 
     assert pw._realtime is True
     assert pw._rt_running is True
-    assert pw._rt_buffers[("MsgA", "Sig1")]["t"] == list(range(10))
+    assert pw._rt_buffers[(0x100, "MsgA", "Sig1")]["t"] == list(range(10))
 
     # 停止监控（保留画面）
     pw.stop_realtime()
     assert pw._realtime is True, "停止后应保持实时模式以便保留画面"
     assert pw._rt_running is False, "停止后不应再接收采样"
-    assert pw._rt_buffers[("MsgA", "Sig1")]["t"] == list(range(10)), "缓冲应保留最后画面数据"
+    assert pw._rt_buffers[(0x100, "MsgA", "Sig1")]["t"] == list(range(10)), "缓冲应保留最后画面数据"
 
     # 停止后继续 push 不应再改变数据
-    pw.push_sample("MsgA", "Sig1", 999.0, 999.0)
-    assert pw._rt_buffers[("MsgA", "Sig1")]["t"] == list(range(10)), "停止后 push 被忽略"
+    pw.push_sample(0x100, "MsgA", "Sig1", 999.0, 999.0)
+    assert pw._rt_buffers[(0x100, "MsgA", "Sig1")]["t"] == list(range(10)), "停止后 push 被忽略"
 
     # 共享Y轴 -> 独立子图：图表不应消失
     pw._toggle_mode()  # -> 独立子图
@@ -54,7 +54,7 @@ def test_plot_freeze_after_stop():
     # 重新开始时缓冲应被重置
     pw.start_realtime(meta)
     assert pw._rt_running is True
-    assert pw._rt_buffers[("MsgA", "Sig1")]["t"] == [], "重新开始应清空缓冲"
+    assert pw._rt_buffers[(0x100, "MsgA", "Sig1")]["t"] == [], "重新开始应清空缓冲"
     print("OK: 停止监控后切换模式图表保留，重新开始时缓冲重置")
 
 

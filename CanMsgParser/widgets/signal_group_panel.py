@@ -14,9 +14,10 @@ from dataclasses import dataclass, field
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton,
     QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
-    QFileDialog, QLabel, QAbstractItemView,
+    QFileDialog, QLabel, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
+    QLineEdit,
 )
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import pyqtSignal, Qt, QTimer
 from core.can_data import MessageDef
 from widgets.signal_tree import SignalTreeWidget
 
@@ -27,6 +28,7 @@ class SignalRef:
     msg_name: str
     sig_name: str
     frame_id: str  # hex string like "0x1A0"
+    remark: str = ""  # 用户备注（描述信号功能），随配置持久化
 
 
 @dataclass
@@ -124,6 +126,13 @@ class SignalGroupPanel(QWidget):
         self._groups: list[SignalGroup] = []
         self._current_group_idx: int = -1
         self._messages: list[MessageDef] = []  # 当前 DBC 报文定义
+        # 自动保存：已知配置文件路径 + 脏标记（备注/增删/改组触发）
+        self._config_path: str = ""
+        self._dirty: bool = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(2000)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start()
 
         self.setStyleSheet(self._QSS)
         self._setup_ui()
@@ -186,11 +195,17 @@ class SignalGroupPanel(QWidget):
         group_bar.addStretch()
         layout.addLayout(group_bar)
 
-        # ─── 信号列表 ───
-        self._sig_list = QListWidget()
+        # ─── 信号列表（Issue 4：树形两列——信号名 + 可编辑备注）───
+        self._sig_list = QTreeWidget()
+        self._sig_list.setColumnCount(2)
+        self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
         self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._sig_list.setAlternatingRowColors(True)
-        self._sig_list.setMaximumHeight(160)
+        self._sig_list.setMaximumHeight(180)
+        self._sig_list.setColumnWidth(0, 280)
+        self._sig_list.setColumnWidth(1, 220)
+        self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._sig_list.itemChanged.connect(self._on_sig_checked)
         layout.addWidget(self._sig_list, stretch=1)
 
         # ─── 操作按钮栏 ───
@@ -256,10 +271,14 @@ class SignalGroupPanel(QWidget):
         group = self._groups[self._current_group_idx]
         existing = {(s.msg_name, s.sig_name) for s in group.signals}
 
+        added = False
         for msg_name, sig_name, frame_id in signals:
             if (msg_name, sig_name) not in existing:
                 group.signals.append(SignalRef(msg_name, sig_name, frame_id))
+                added = True
 
+        if added:
+            self._dirty = True
         self._refresh_signal_list()
         # 更新 combo 显示
         idx = self._current_group_idx
@@ -274,11 +293,12 @@ class SignalGroupPanel(QWidget):
     def get_checked_signals(self) -> list[tuple[str, str]]:
         """返回当前分组中已勾选的 (msg_name, sig_name) 列表"""
         result = []
-        for i in range(self._sig_list.count()):
-            item = self._sig_list.item(i)
-            if (item.flags() & Qt.ItemIsUserCheckable) and item.checkState() == Qt.Checked:
-                sig_ref = item.data(Qt.UserRole)
-                result.append((sig_ref.msg_name, sig_ref.sig_name))
+        for i in range(self._sig_list.topLevelItemCount()):
+            item = self._sig_list.topLevelItem(i)
+            if (item.flags() & Qt.ItemIsUserCheckable) and item.checkState(0) == Qt.Checked:
+                sig_ref = item.data(0, Qt.UserRole)
+                if sig_ref is not None:
+                    result.append((sig_ref.msg_name, sig_ref.sig_name))
         return result
 
     # ────────────────────── 分发 / 添加 ──────────────────────
@@ -311,6 +331,7 @@ class SignalGroupPanel(QWidget):
         name, ok = QInputDialog.getText(self, "新建分组", "分组名称:")
         if ok and name.strip():
             self._groups.append(SignalGroup(name=name.strip()))
+            self._dirty = True
             self._refresh_combo()
             self._group_combo.setCurrentIndex(len(self._groups) - 1)
 
@@ -324,6 +345,7 @@ class SignalGroupPanel(QWidget):
         )
         if reply == QMessageBox.Yes:
             self._groups.pop(self._current_group_idx)
+            self._dirty = True
             self._refresh_combo()
 
     def _on_group_changed(self, idx: int):
@@ -344,7 +366,12 @@ class SignalGroupPanel(QWidget):
         self._refresh_signal_list()
 
     def _refresh_signal_list(self):
-        """刷新信号列表，检查 DBC 匹配状态"""
+        """刷新信号列表（Issue 4：两列树形），检查 DBC 匹配状态
+
+        备注列用 setItemWidget 嵌入 QLineEdit（本环境 QTreeWidgetItem 的
+        flags/setFlags 不支持列参数，故不用 per-column 可编辑标志，改用
+        控件更稳定可靠）。
+        """
         # 构建期间屏蔽勾选信号，避免刷新触发 checked_changed 误报
         self._sig_list.blockSignals(True)
         self._sig_list.clear()
@@ -364,33 +391,43 @@ class SignalGroupPanel(QWidget):
             key = (sig_ref.msg_name, sig_ref.sig_name)
             matched = key in dbc_lookup
 
-            display_text = f"{sig_ref.sig_name}  ({sig_ref.msg_name} · {sig_ref.frame_id})"
-            item = QListWidgetItem(display_text)
-            item.setData(Qt.UserRole, sig_ref)
+            item = QTreeWidgetItem()
+            item.setText(0, f"{sig_ref.sig_name}  ({sig_ref.msg_name} · {sig_ref.frame_id})")
+            item.setData(0, Qt.UserRole, sig_ref)
 
             if matched:
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(0, Qt.Unchecked)
             else:
                 # 置灰不可勾选
                 item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsEnabled)
-                item.setToolTip("当前 DBC 中未找到此信号")
-                from PyQt5.QtGui import QColor
-                item.setForeground(QColor("#555560"))
+                item.setToolTip(0, "当前 DBC 中未找到此信号")
+                item.setForeground(0, QColor("#555560"))
 
-            self._sig_list.addItem(item)
+            self._sig_list.addTopLevelItem(item)
+
+            # 备注列：可编辑 QLineEdit（Issue 4）
+            le = QLineEdit(sig_ref.remark or "")
+            le.setPlaceholderText("描述信号功能")
+            le.setEnabled(matched)
+            le.editingFinished.connect(
+                lambda _checked=False, it=item, w=le: self._on_remark_edited(it, w)
+            )
+            self._sig_list.setItemWidget(item, 1, le)
         self._sig_list.blockSignals(False)
 
     # ────────────────────── 信号操作 ──────────────────────
 
-    def _on_sig_checked(self, item):
-        """组内信号勾选变化：通知外部页面联动刷新
-
-        注意：_sig_list 是 QListWidget，其 itemChanged 信号仅发射 (item)
-        一个参数，因此本槽只接收 item（不要加 column 参数，否则勾选时会
-        抛出 "missing 1 required positional argument: 'column'"）。
-        """
+    def _on_sig_checked(self, item, column):
+        """组内信号勾选变化：通知外部页面联动刷新（备注编辑由 _on_remark_edited 处理）"""
         self.checked_changed.emit(self.get_checked_signals())
+
+    def _on_remark_edited(self, item, line_edit):
+        """Issue 4：备注编辑完成——写回 SignalRef 并标记脏（触发自动保存）。"""
+        sig_ref = item.data(0, Qt.UserRole)
+        if sig_ref is not None:
+            sig_ref.remark = line_edit.text().strip()
+            self._dirty = True
 
     def _remove_selected(self):
         """移除选中的信号"""
@@ -400,11 +437,12 @@ class SignalGroupPanel(QWidget):
         group = self._groups[self._current_group_idx]
         selected = self._sig_list.selectedItems()
         for item in selected:
-            sig_ref = item.data(Qt.UserRole)
+            sig_ref = item.data(0, Qt.UserRole)
             group.signals = [s for s in group.signals if not (
                 s.msg_name == sig_ref.msg_name and s.sig_name == sig_ref.sig_name
             )]
 
+        self._dirty = True
         self._refresh_signal_list()
         # 更新 combo 显示
         idx = self._current_group_idx
@@ -412,17 +450,17 @@ class SignalGroupPanel(QWidget):
 
     def _select_all_signals(self):
         """全选当前分组中所有可勾选的信号"""
-        for i in range(self._sig_list.count()):
-            item = self._sig_list.item(i)
+        for i in range(self._sig_list.topLevelItemCount()):
+            item = self._sig_list.topLevelItem(i)
             if item.flags() & Qt.ItemIsUserCheckable:
-                item.setCheckState(Qt.Checked)
+                item.setCheckState(0, Qt.Checked)
 
     def _deselect_all_signals(self):
         """全不选"""
-        for i in range(self._sig_list.count()):
-            item = self._sig_list.item(i)
+        for i in range(self._sig_list.topLevelItemCount()):
+            item = self._sig_list.topLevelItem(i)
             if item.flags() & Qt.ItemIsUserCheckable:
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(0, Qt.Unchecked)
 
     # ────────────────────── 配置文件保存/加载 ──────────────────────
 
@@ -437,6 +475,14 @@ class SignalGroupPanel(QWidget):
         if not path:
             return
 
+        self._write_config(path)
+        self._config_path = path
+        self._dirty = False
+        # 通知主窗口记住此路径
+        self.config_saved.emit(path)
+
+    def _write_config(self, path: str):
+        """把当前分组配置写入指定 JSON 文件（无 GUI 交互，供手动保存与自动保存共用）。"""
         config = {
             "groups": [
                 {
@@ -446,6 +492,7 @@ class SignalGroupPanel(QWidget):
                             "msg_name": s.msg_name,
                             "sig_name": s.sig_name,
                             "frame_id": s.frame_id,
+                            "remark": s.remark,
                         }
                         for s in g.signals
                     ],
@@ -453,12 +500,19 @@ class SignalGroupPanel(QWidget):
                 for g in self._groups
             ]
         }
-
         with open(path, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
 
-        # 通知主窗口记住此路径
-        self.config_saved.emit(path)
+    def _autosave(self):
+        """Issue 4：定时检查脏标记，若已设置配置文件路径则静默自动保存。"""
+        if not self._dirty or not self._config_path:
+            return
+        try:
+            self._write_config(self._config_path)
+            self._dirty = False
+        except Exception:  # noqa: BLE001
+            # 自动保存失败不弹窗打断用户，下一次定时仍会重试
+            pass
 
     def _load_config(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -478,12 +532,15 @@ class SignalGroupPanel(QWidget):
                         msg_name=s["msg_name"],
                         sig_name=s["sig_name"],
                         frame_id=s.get("frame_id", ""),
+                        remark=s.get("remark", ""),
                     )
                     for s in g_data.get("signals", [])
                 ]
                 self._groups.append(SignalGroup(name=g_data["name"], signals=signals))
 
             self._refresh_combo()
+            self._config_path = path
+            self._dirty = False
 
         except Exception as e:
             QMessageBox.critical(self, "加载失败", str(e))
@@ -507,9 +564,12 @@ class SignalGroupPanel(QWidget):
                     msg_name=s["msg_name"],
                     sig_name=s["sig_name"],
                     frame_id=s.get("frame_id", ""),
+                    remark=s.get("remark", ""),
                 )
                 for s in g_data.get("signals", [])
             ]
             self._groups.append(SignalGroup(name=g_data["name"], signals=signals))
 
         self._refresh_combo()
+        self._config_path = path
+        self._dirty = False

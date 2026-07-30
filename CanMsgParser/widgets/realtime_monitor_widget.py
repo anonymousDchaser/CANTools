@@ -82,9 +82,15 @@ class RealtimeMonitorWidget(QWidget):
         self._start_btn.setProperty("class", "primary")
         self._start_btn.clicked.connect(self._on_start_stop)
         ctrl.addWidget(self._start_btn)
+        self._reset_btn = QPushButton("重置曲线")
+        self._reset_btn.setToolTip("清空当前曲线（监控中点击则清空画面并继续记录）")
+        self._reset_btn.clicked.connect(self._on_reset_plot)
+        ctrl.addWidget(self._reset_btn)
         right_layout.addLayout(ctrl)
 
         self._plot = PlotWidget()
+        # Issue 3：实时监控页默认使用独立子图模式
+        self._plot.set_subplot_mode(True)
         right_layout.addWidget(self._plot, stretch=1)
 
         splitter.addWidget(right)
@@ -199,6 +205,14 @@ class RealtimeMonitorWidget(QWidget):
         self._monitoring = False
         self._start_btn.setText("开始监控")
         self._status_label.setText("已停止")
+
+    def _on_reset_plot(self):
+        """Issue 3：重置曲线按钮——清空当前画面，监控中则继续记录。"""
+        self._plot.reset_realtime()
+        if self._monitoring:
+            self._status_label.setText("曲线已重置，继续记录…")
+        else:
+            self._status_label.setText("曲线已清空")
 
     # ────────────────────── 信号回调 ──────────────────────
 

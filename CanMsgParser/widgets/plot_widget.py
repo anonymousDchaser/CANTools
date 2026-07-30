@@ -120,6 +120,9 @@ class PlotWidget(QWidget):
         self._pinned_annotations: dict = {}
         # Issue 2: 实时坐标显示文本对象（每个 axes 一个）
         self._coord_texts: dict = {}
+        # Issue 1: line -> sig_name 映射，悬停注释用它精确取信号名（避免实时模式
+        #          的 label 带 (0xID) 后缀导致 split(".")[-1] 取错匹配不到值描述）
+        self._line_sig_name: dict = {}
         # ─── 实时曲线模式（用于信号实时监控页） ───
         self._realtime: bool = False            # 是否处于实时模式（停止后保留以保留画面）
         self._rt_running: bool = False           # 是否正在接收实时采样（停止后为 False 不再收数）
@@ -315,10 +318,33 @@ class PlotWidget(QWidget):
         self._rt_running = False
         # 不清除 _realtime / _rt_meta / _rt_buffers，保留最后一次绘制结果
 
+    def reset_realtime(self):
+        """清空当前实时曲线数据（Issue 3：实时监控页「重置」按钮）。
+
+        仅清空缓冲区与曲线，保留 _realtime / _rt_meta / _rt_running 状态：
+        - 若监控仍在进行（_rt_running=True），后续采样会立即继续绘制新曲线；
+        - 若已停止监控，画面回到空坐标轴但不丢失「已选信号」配置。
+        """
+        if not self._realtime:
+            return
+        for key in list(self._rt_buffers.keys()):
+            self._rt_buffers[key]["t"].clear()
+            self._rt_buffers[key]["v"].clear()
+        self._redraw()
+
+    def set_subplot_mode(self, enabled: bool):
+        """设置是否使用独立子图模式（Issue 3：实时监控页默认独立子图）。
+
+        仅更新内部标志与工具栏按钮文案，等下次 redraw 生效。
+        """
+        self._subplot_mode = bool(enabled)
+        self._mode_btn.setText("切换为共享Y轴" if self._subplot_mode else "切换为独立子图")
+
     def _build_realtime(self):
         """根据实时缓冲构建坐标轴与空曲线（模式切换时复用）"""
         self._rt_lines = {}
         self._rt_axes = {}
+        self._line_sig_name.clear()
 
         if self._subplot_mode:
             n = len(self._rt_meta)
@@ -333,6 +359,7 @@ class PlotWidget(QWidget):
                          if frame_id is not None else f"{msg_name}.{sig_name}")
                 line, = ax.plot([], [], color=color, linewidth=self._original_linewidth,
                                 marker="o", markersize=2, label=label, alpha=0.9)
+                self._line_sig_name[line] = sig_name
                 ax.set_title(label, loc="left", fontsize=9, color=color, pad=2)
                 ax.grid(True, linestyle="--", alpha=0.4, color="#3a3a4e")
                 legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
@@ -352,6 +379,7 @@ class PlotWidget(QWidget):
                          if frame_id is not None else f"{msg_name}.{sig_name}")
                 line, = ax.plot([], [], color=color, linewidth=self._original_linewidth,
                                 marker="o", markersize=2, label=label, alpha=0.9)
+                self._line_sig_name[line] = sig_name
                 self._rt_lines[(frame_id, msg_name, sig_name)] = line
                 self._rt_axes[(frame_id, msg_name, sig_name)] = ax
             legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
@@ -383,6 +411,7 @@ class PlotWidget(QWidget):
 
     def _draw_shared(self):
         """共享 Y 轴模式"""
+        self._line_sig_name.clear()
         ax = self._fig.add_subplot(111)
         ax.set_facecolor("#1e1e2e")
         ax.set_xlabel("时间 (s)", fontsize=11)
@@ -393,8 +422,9 @@ class PlotWidget(QWidget):
             color = COLORS[i % len(COLORS)]
             ts, vals = self._downsample_if_needed(sig.timestamps, sig.values)
             label = f"{sig.msg_name}.{sig.sig_name}"
-            ax.plot(ts, vals, color=color, linewidth=self._original_linewidth,
+            line, = ax.plot(ts, vals, color=color, linewidth=self._original_linewidth,
                     marker="o", markersize=2, label=label, alpha=0.9)
+            self._line_sig_name[line] = sig.sig_name
 
         legend = ax.legend(loc="upper right", draggable=True, framealpha=0.85)
         legend.get_frame().set_edgecolor("#3a3a4e")
@@ -411,8 +441,9 @@ class PlotWidget(QWidget):
             ax.set_facecolor("#1e1e2e")
             ts, vals = self._downsample_if_needed(sig.timestamps, sig.values)
             label = f"{sig.msg_name}.{sig.sig_name}"
-            ax.plot(ts, vals, color=color, linewidth=self._original_linewidth,
+            line, = ax.plot(ts, vals, color=color, linewidth=self._original_linewidth,
                     marker="o", markersize=2, label=label, alpha=0.9)
+            self._line_sig_name[line] = sig.sig_name
             # Issue 4: 不使用 set_ylabel 避免长信号名与相邻子图重叠，改用子图内标题
             ax.set_title(f"{sig.msg_name}.{sig.sig_name}", loc='left', fontsize=9,
                          color=color, pad=2)
@@ -549,8 +580,9 @@ class PlotWidget(QWidget):
             import matplotlib.colors as mcolors
             color = mcolors.to_hex(color)
 
-        # Issue 5: 查找 DBC 值描述
-        sig_name = label.split(".")[-1] if "." in label else label
+        # Issue 5: 查找 DBC 值描述（用 line->sig_name 映射精确取信号名，
+        #          兼容实时模式 label 带 (0xID) 后缀的情况）
+        sig_name = self._line_sig_name.get(line, label.split(".")[-1] if "." in label else label)
         val_int = int(round(y))
         desc = ""
         if sig_name in self._value_descriptions:
@@ -719,8 +751,8 @@ class PlotWidget(QWidget):
             x = xdata[idx]
             y = line.get_ydata()[idx]
 
-            # Issue 5: 同样支持 DBC 值描述
-            sig_name = label.split(".")[-1] if "." in label else label
+            # Issue 5: 同样支持 DBC 值描述（line->sig_name 映射精确取信号名）
+            sig_name = self._line_sig_name.get(line, label.split(".")[-1] if "." in label else label)
             val_int = int(round(y))
             desc = ""
             if sig_name in self._value_descriptions:
