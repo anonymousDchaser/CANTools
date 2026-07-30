@@ -25,6 +25,7 @@ from widgets.message_table import MessageTableWidget
 from widgets.bit_layout_view import BitLayoutView
 from widgets.realtime_monitor_widget import RealtimeMonitorWidget
 from widgets.signal_sim_widget import SignalSimWidget
+from widgets.replay_widget import ReplayWidget
 from widgets.del_key_filter import DelKeyFilter
 from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
@@ -121,6 +122,31 @@ class MainWindow(QMainWindow):
         QTabBar::tab:hover:!selected {
             background-color: #2a2a3e;
             color: #e0e0e0;
+        }
+
+        /* ── 分组停靠窗（含悬浮态：修复悬浮后控件外底色变白）── */
+        QDockWidget {
+            background-color: #1e1e2e;
+            color: #e0e0e0;
+            border: 1px solid #3a3a4e;
+        }
+        QDockWidget::title {
+            background-color: #252535;
+            color: #e0e0e0;
+            padding: 6px 10px;
+            border-bottom: 1px solid #3a3a4e;
+        }
+        QDockWidget::close-button, QDockWidget::float-button {
+            background-color: #252535;
+            border: none;
+            icon-size: 14px;
+        }
+        QDockWidget::close-button:hover, QDockWidget::float-button:hover {
+            background-color: #3a3a4e;
+        }
+        /* 停靠窗内容区底色（悬浮时控件与标题外的区域） */
+        QDockWidget > QWidget {
+            background-color: #1e1e2e;
         }
 
         /* ── 分割器手柄 ── */
@@ -520,7 +546,11 @@ class MainWindow(QMainWindow):
         self._realtime_msg_widget = RealtimeMessageWidget()
         self._tabs.addTab(self._realtime_msg_widget, "📡 实时报文")
 
-        # ─── Tab 7: 位图查看器 ───
+        # ─── Tab 7: 报文回放 ───
+        self._replay_widget = ReplayWidget()
+        self._tabs.addTab(self._replay_widget, "🔁 报文回放")
+
+        # ─── Tab 8: 位图查看器 ───
         self._bit_layout = BitLayoutView()
         self._tabs.addTab(self._bit_layout, "🔢 位图查看器")
 
@@ -529,6 +559,7 @@ class MainWindow(QMainWindow):
         self._sim_widget.set_connection_manager(self._conn_manager)
         self._monitor_widget.set_connection_manager(self._conn_manager)
         self._realtime_msg_widget.set_connection_manager(self._conn_manager)
+        self._replay_widget.set_connection_manager(self._conn_manager)
 
         # 连接状态页信号接线
         self._conn_widget.dbc_load_requested.connect(self._load_dbc)
@@ -660,6 +691,8 @@ class MainWindow(QMainWindow):
             self._sim_widget.set_dbc_path(path)
             # 同步 Excel 矩阵值库（若已加载），使模拟值下拉立即可用
             self._sim_widget.set_value_db(getattr(self, "_value_db", {}))
+            # 报文回放页同步 DBC（用于 ID 列表显示报文名）
+            self._replay_widget.set_dbc_path(path)
             # 实时报文页 / 连接状态页同步
             self._realtime_msg_widget.set_dbc_path(path)
             self._conn_widget.set_dbc_path(path)
@@ -865,6 +898,10 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
             try:
+                self._replay_widget.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 self._monitor_widget.stop()
             except Exception:  # noqa: BLE001
                 pass
@@ -972,6 +1009,8 @@ class MainWindow(QMainWindow):
         self._sim_widget.set_dbc_path(path)
         # 同步 Excel 矩阵值库（若已加载），使模拟值下拉立即可用
         self._sim_widget.set_value_db(getattr(self, "_value_db", {}))
+        # 报文回放页同步 DBC（用于 ID 列表显示报文名）
+        self._replay_widget.set_dbc_path(path)
         # 实时报文页 / 连接状态页同步
         self._realtime_msg_widget.set_dbc_path(path)
         self._conn_widget.set_dbc_path(path)
@@ -1065,6 +1104,10 @@ class MainWindow(QMainWindow):
         """退出前停止各功能页并断开共享总线，避免线程悬挂/设备未释放"""
         try:
             self._sim_widget.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._replay_widget.stop()
         except Exception:  # noqa: BLE001
             pass
         try:

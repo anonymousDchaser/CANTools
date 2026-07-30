@@ -114,6 +114,10 @@ class SignalGroupPanel(QWidget):
         QListWidget::item {
             padding: 5px 8px;
         }
+        QTreeWidget::item {
+            min-height: 28px;
+            padding: 7px 8px;
+        }
         QListWidget::item:selected {
             background-color: #1e3a5a;
             color: #4fc3f7;
@@ -196,6 +200,12 @@ class SignalGroupPanel(QWidget):
 
         group_bar.addStretch()
         layout.addLayout(group_bar)
+
+        # ─── 组内信号搜索框（Task #1：按信号名 / 报文名 / 备注内容过滤）───
+        self._sig_search = QLineEdit()
+        self._sig_search.setPlaceholderText("🔍 搜索信号名 / 报文名 / 备注…")
+        self._sig_search.textChanged.connect(self._on_group_search)
+        layout.addWidget(self._sig_search)
 
         # ─── 信号列表（Issue 4：树形两列——信号名 + 可编辑备注）───
         self._sig_list = QTreeWidget()
@@ -414,18 +424,39 @@ class SignalGroupPanel(QWidget):
             # 备注列：可编辑 QLineEdit（Issue 4）
             le = QLineEdit(sig_ref.remark or "")
             le.setPlaceholderText("描述信号功能")
+            le.setMinimumHeight(26)  # Task #4：增大备注编辑框行高，避免文字显示不全
             le.setEnabled(matched)
             le.editingFinished.connect(
                 lambda _checked=False, it=item, w=le: self._on_remark_edited(it, w)
             )
             self._sig_list.setItemWidget(item, 1, le)
         self._sig_list.blockSignals(False)
+        # 重建后重新应用搜索过滤（Task #1）
+        self._on_group_search(self._sig_search.text())
 
     # ────────────────────── 信号操作 ──────────────────────
 
     def _on_sig_checked(self, item, column):
         """组内信号勾选变化：通知外部页面联动刷新（备注编辑由 _on_remark_edited 处理）"""
         self.checked_changed.emit(self.get_checked_signals())
+
+    def _on_group_search(self, text: str):
+        """Task #1：按信号名 / 报文名 / 备注内容过滤组内信号列表（不改动底层数据）。
+
+        仅改变行的隐藏状态；底层 group.signals 保持不变，DEL 移除等逻辑只
+        作用于当前可见（未隐藏）的选中项。
+        """
+        text = (text or "").strip().lower()
+        for i in range(self._sig_list.topLevelItemCount()):
+            item = self._sig_list.topLevelItem(i)
+            sig_ref = item.data(0, Qt.UserRole)
+            if not text:
+                item.setHidden(False)
+                continue
+            haystack = item.text(0).lower()
+            if sig_ref is not None:
+                haystack += " " + (sig_ref.remark or "").lower()
+            item.setHidden(text not in haystack)
 
     def _on_remark_edited(self, item, line_edit):
         """Issue 4：备注编辑完成——写回 SignalRef 并标记脏（触发自动保存）。"""

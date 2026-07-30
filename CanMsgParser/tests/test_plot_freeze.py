@@ -35,7 +35,9 @@ def test_plot_freeze_after_stop():
     pw.push_sample(0x100, "MsgA", "Sig1", 999.0, 999.0)
     assert pw._rt_buffers[(0x100, "MsgA", "Sig1")]["t"] == list(range(10)), "停止后 push 被忽略"
 
-    # 共享Y轴 -> 独立子图：图表不应消失
+    # 显式切到共享Y轴，再切到独立子图：图表不应消失
+    # （曲线图默认已为独立子图，这里先回到共享Y轴再验证双向切换均保留画面）
+    pw.set_subplot_mode(False)  # -> 共享Y轴
     pw._toggle_mode()  # -> 独立子图
     assert pw._subplot_mode is True
     assert pw._realtime is True

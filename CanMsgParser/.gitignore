@@ -3,12 +3,14 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# PyInstaller 打包产物
+# PyInstaller 打包产物（dist/ 现按需求正常提交；build/ 与 *.spec 为可重建中间产物，忽略）
 build/
-dist/
 *.spec
 
-# 构建日志与临时备份（build.py 的改名备份策略会生成这些）
+# 构建临时垃圾目录（build.py 把上一版 dist/build 改名移到此处，不入库）
+.build_trash/
+
+# 构建日志与临时备份
 *.log
 _diag.log
 *.bak_*
