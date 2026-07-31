@@ -8,18 +8,22 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
 from widgets.del_key_filter import DelKeyFilter
+from widgets.theme import DARK_PANEL_QSS
 
 
 class SignalTreeWidget(QWidget):
-    """左侧信号树面板"""
+    """信号检索视图（独立停靠窗）：浏览/搜索 DBC 报文与信号，勾选后可分发或加入分组"""
     selection_changed = pyqtSignal(list)
     # (target, signals) - target in {"curve","monitor","sim"}
     dispatch_requested = pyqtSignal(str, list)
+    # 将已勾选信号加入"信号分组"视图的当前分组
+    add_to_group_requested = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._messages: list[MessageDef] = []
         self._all_items: dict[str, QTreeWidgetItem] = {}
+        self.setStyleSheet(DARK_PANEL_QSS)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -90,6 +94,13 @@ class SignalTreeWidget(QWidget):
         self._del_filter = DelKeyFilter(self._checked_list, self._on_remove_checked)
 
         checked_remove_bar = QHBoxLayout()
+        self._add_to_group_btn = QPushButton("加入分组")
+        self._add_to_group_btn.setProperty("class", "primary")
+        self._add_to_group_btn.setToolTip("将已勾选信号加入「信号分组」视图的当前分组")
+        self._add_to_group_btn.clicked.connect(
+            lambda: self.add_to_group_requested.emit(self.get_checked_signals())
+        )
+        checked_remove_bar.addWidget(self._add_to_group_btn)
         self._checked_remove_btn = QPushButton("移除选中")
         self._checked_remove_btn.setToolTip("从已勾选列表中移除，并同步取消搜索树中的勾选")
         self._checked_remove_btn.clicked.connect(self._on_remove_checked)

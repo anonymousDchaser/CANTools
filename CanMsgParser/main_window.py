@@ -21,6 +21,7 @@ from widgets.plot_widget import PlotWidget
 from widgets.connection_status_widget import ConnectionStatusWidget
 from widgets.realtime_message_widget import RealtimeMessageWidget
 from widgets.signal_group_panel import SignalGroupPanel
+from widgets.signal_tree import SignalTreeWidget
 from widgets.message_table import MessageTableWidget
 from widgets.bit_layout_view import BitLayoutView
 from widgets.realtime_monitor_widget import RealtimeMonitorWidget
@@ -238,6 +239,28 @@ class MainWindow(QMainWindow):
             color: #666680;
         }
 
+        /* ── 复选框（信号分组 / 信号检索视图等）── */
+        QCheckBox {
+            background-color: transparent;
+            color: #e0e0e0;
+            spacing: 6px;
+            font-size: 13px;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #4a4a5e;
+            border-radius: 3px;
+            background-color: #2a2a3e;
+        }
+        QCheckBox::indicator:unchecked:hover {
+            border-color: #4fc3f7;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #4fc3f7;
+            border-color: #4fc3f7;
+        }
+
         /* ── 按钮通用 ── */
         QPushButton {
             background-color: #3a3a4e;
@@ -323,7 +346,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # 进程内共享的 CAN 连接管理器：模拟上报/实时监控/实时报文三页共用
         self._conn_manager = CanConnectionManager(self)
-        self.setWindowTitle("CAN 报文分析工具")
+        self.setWindowTitle("CAN 报文分析工具 v1.1.0")
         self.setMinimumSize(1280, 720)
         self.resize(1920, 1280)
 
@@ -576,14 +599,14 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self._tabs)
 
-        # ─── 信号分组停靠窗（可悬浮 / 关闭 / 重新打开）───
-        self._setup_group_dock()
+        # ─── 两个停靠窗：信号分组 + 信号检索（可悬浮 / 关闭 / 重新打开）───
+        self._setup_docks()
 
-    def _setup_group_dock(self):
-        """将 SignalGroupPanel 包装为可停靠/悬浮/关闭的分组窗，供三页共享"""
+    def _setup_docks(self):
+        """创建两个可停靠视图：信号分组 + 信号检索（原分组窗内的搜索树独立出来）。"""
+        # ── 信号分组视图 ──
         self._group_panel = SignalGroupPanel()
         self._group_panel.config_saved.connect(self._on_group_config_saved)
-        # 分组窗分发信号到曲线图/实时监控/模拟上报
         self._group_panel.dispatch_requested.connect(self._on_dispatch)
         self._group_dock = QDockWidget("信号分组", self)
         self._group_dock.setWidget(self._group_panel)
@@ -593,10 +616,25 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetClosable
         )
         self._group_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        # 初始停靠在左侧（构造期保持停靠，依附主窗口，避免成为独立顶层窗
-        # 口在 main_window.show() 之前闪现）。首次显示后在 showEvent 中再
-        # 由 _position_group_dock 浮出到主窗口左侧外部。
+
+        # ── 信号检索视图（独立停靠窗，与信号分组联动）──
+        self._search_panel = SignalTreeWidget()
+        self._search_panel.dispatch_requested.connect(self._on_dispatch)
+        self._search_panel.add_to_group_requested.connect(self._group_panel.add_signals)
+        self._search_dock = QDockWidget("信号检索", self)
+        self._search_dock.setWidget(self._search_panel)
+        self._search_dock.setFeatures(
+            QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetClosable
+        )
+        self._search_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+
+        # 初始并列停靠在左侧（构造期保持停靠，依附主窗口，避免闪现）。
+        # 首次显示后在 showEvent 中由 _position_docks 浮出到主窗口左侧外部。
         self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
+        self.splitDockWidget(self._group_dock, self._search_dock, Qt.Horizontal)
 
     def _setup_menu(self):
         """构建菜单栏"""
@@ -646,6 +684,7 @@ class MainWindow(QMainWindow):
         # ── 视图菜单 ──
         view_menu = menubar.addMenu("视图(&V)")
         view_menu.addAction(self._group_dock.toggleViewAction())
+        view_menu.addAction(self._search_dock.toggleViewAction())
 
         # ── 帮助菜单 ──
         help_menu = menubar.addMenu("帮助(&H)")
@@ -684,6 +723,7 @@ class MainWindow(QMainWindow):
             # 通知各子组件
             self._bit_layout.load_messages(self._messages)
             self._group_panel.set_messages(self._messages)
+            self._search_panel.load_messages(self._messages)
             # 实时监控 / 模拟上报页同步报文定义与 DBC 路径
             self._monitor_widget.set_messages(self._messages)
             self._monitor_widget.set_dbc_path(path)
@@ -910,32 +950,40 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
 
-    def _position_group_dock(self):
-        """将分组窗浮动到主窗口左侧外部（空间不足则停靠回左侧）"""
-        dock = self._group_dock
+    def _position_docks(self):
+        """将两个停靠窗浮动到主窗口左侧外部（信号检索在内、信号分组在外）；
+        空间不足则停靠回左侧并纵向堆叠，保证两个视图都可见。"""
         screen = QApplication.primaryScreen()
         if screen is None:
             return
         avail = screen.availableGeometry()
-        w = dock.width() if dock.width() > 0 else 340
-        h = max(420, int(avail.height() * 0.72))
-        x = self.x() - w - 12
+        gw = self._group_dock.width() if self._group_dock.width() > 0 else 340
+        sw = self._search_dock.width() if self._search_dock.width() > 0 else 320
+        gh = max(420, int(avail.height() * 0.72))
+        x_group = self.x() - gw - 12
+        x_search = x_group - sw - 12
         y = self.y() + 30
-        if x < avail.x():
-            # 左侧无足够空间，停靠回左侧
-            dock.setFloating(False)
-            self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        if x_search < avail.x():
+            # 左侧无足够空间，停靠回左侧并纵向堆叠
+            self._group_dock.setFloating(False)
+            self._search_dock.setFloating(False)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
+            self.splitDockWidget(self._group_dock, self._search_dock, Qt.Vertical)
             return
-        dock.setFloating(True)
-        dock.resize(w, h)
-        dock.move(x, y)
+        self._search_dock.setFloating(True)
+        self._search_dock.resize(sw, gh)
+        self._search_dock.move(x_search, y)
+        self._group_dock.setFloating(True)
+        self._group_dock.resize(gw, gh)
+        self._group_dock.move(x_group, y)
 
     def showEvent(self, event):
         super().showEvent(event)
         # 仅首次显示后将分组窗尝试浮动到左侧外部
         if not self._dock_positioned:
             self._dock_positioned = True
-            self._position_group_dock()
+            self._position_docks()
 
     def _on_group_config_saved(self, path: str):
         """分组配置保存回调：记住路径以便下次启动时自动加载"""
@@ -1002,6 +1050,7 @@ class MainWindow(QMainWindow):
         self._dbc_path = path
         self._bit_layout.load_messages(self._messages)
         self._group_panel.set_messages(self._messages)
+        self._search_panel.load_messages(self._messages)
         # 实时监控 / 模拟上报页同步报文定义与 DBC 路径
         self._monitor_widget.set_messages(self._messages)
         self._monitor_widget.set_dbc_path(path)
@@ -1068,7 +1117,7 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         about_text = """
         <h2>CAN 报文分析工具</h2>
-        <p><b>版本:</b> 1.0.0</p>
+        <p><b>版本:</b> 1.1.0</p>
         <p><b>作者:</b> laizhenxin</p>
         <p><b>邮箱:</b> lzxDchaser@126.com</p>
         <hr>
