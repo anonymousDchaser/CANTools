@@ -134,7 +134,7 @@ class SignalSimWidget(QWidget):
         self._value_table.setRootIsDecorated(True)
         self._value_table.setHeaderLabels([
             "信号 / 报文组", "换算公式 / 信号数", "模拟值 / 组周期",
-            "手动值", "自动递增", "状态 / 组状态", "详情", "操作",
+            "手动值 / 所有信号", "自动递增", "状态 / 组状态", "详情", "操作",
         ])
         hdr = self._value_table.header()
         hdr.setSectionResizeMode(COL_SIG, QHeaderView.ResizeToContents)
@@ -147,14 +147,18 @@ class SignalSimWidget(QWidget):
         hdr.setSectionResizeMode(COL_ACTION, QHeaderView.Fixed)
         self._value_table.setColumnWidth(COL_SIG, 240)
         self._value_table.setColumnWidth(COL_VALUE, 175)
-        self._value_table.setColumnWidth(COL_MANUAL, 90)
+        # 组行的「所有信号」勾选框也放在该列，宽度需容得下四字 + 指示器
+        self._value_table.setColumnWidth(COL_MANUAL, 110)
         self._value_table.setColumnWidth(COL_DETAIL, 160)
         self._value_table.setColumnWidth(COL_ACTION, 90)
         self._value_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._value_table.setAlternatingRowColors(True)
-        # Task #4：增大行高，避免「模拟值」下拉文本显示不全
+        # 行高：setItemWidget 放入的控件高度 = 行高 - 上下 padding。
+        # 原来 min-height:24px + padding:5px 只给下拉框留 24px，而 QComboBox
+        # 的 sizeHint 高度就有 25px，被压扁 1px 导致选中后文字上下被切。
+        # 这里把 min-height 提到 30px（控件可用 30px，比 sizeHint 富余 5px）。
         self._value_table.setStyleSheet(
-            "QTreeWidget::item { min-height: 24px; padding: 5px 6px; }"
+            "QTreeWidget::item { min-height: 30px; padding: 5px 6px; }"
         )
         right_layout.addWidget(self._value_table, stretch=2)
 
@@ -271,9 +275,33 @@ class SignalSimWidget(QWidget):
             return f"x*{scale}"
         return f"x*{scale}+{offset}" if offset > 0 else f"x*{scale}{offset}"
 
-    def _add_table_rows(self, keys: list):
+    def _all_keys_of_frame(self, frame_id: int) -> list:
+        """该 CAN ID 报文在 DBC 中的全部信号 key（按 DBC 顺序）。"""
+        for m in self._messages:
+            if m.frame_id == frame_id:
+                return [(m.name, s.name) for s in m.signals]
+        return []
+
+    def _mark_row_extra(self, key: tuple, extra: bool):
+        """标记某行是否为「所有信号」展开出来的补充行（置灰以区别于已选信号）。"""
+        rd = self._row_data.get(key)
+        if rd is None:
+            return
+        rd["extra"] = extra
+        item = rd["status_item"]
+        item.setForeground(COL_SIG, QColor("#9090a0" if extra else "#e0e0e0"))
+        item.setToolTip(
+            COL_SIG,
+            "「所有信号」展开的补充信号：可修改模拟值并随整帧发送，\n"
+            "取消勾选「所有信号」后会被移除（不影响已选信号）。" if extra else "",
+        )
+
+    def _add_table_rows(self, keys: list, extra: bool = False):
         for key in keys:
             if key in self._row_data:
+                # 已存在的行：若它原本是补充行、现在被用户正式选中，则恢复正常样式
+                if not extra:
+                    self._mark_row_extra(key, False)
                 continue
             msg_name, sig_name = key
             sdef = self._find_sig_def(msg_name, sig_name)
@@ -298,6 +326,17 @@ class SignalSimWidget(QWidget):
                     lambda _v, f=frame_id: self._on_group_cycle_changed(f)
                 )
                 self._value_table.setItemWidget(grp_item, COL_VALUE, cycle_spin)
+                # 「所有信号」：勾选后展开该报文在 DBC 中的全部信号供修改模拟值，
+                # 取消勾选则仅保留用户已选信号（补充行连同其取值一并移除）。
+                all_chk = QCheckBox("所有信号")
+                all_chk.setToolTip(
+                    "勾选：显示该报文的全部信号，均可修改模拟值并随整帧发送\n"
+                    "取消：仅保留你已选择的信号"
+                )
+                all_chk.toggled.connect(
+                    lambda ck, f=frame_id: self._on_show_all_toggled(f, ck)
+                )
+                self._value_table.setItemWidget(grp_item, COL_MANUAL, all_chk)
                 grp_status = QTreeWidgetItem(grp_item)
                 grp_status.setText(COL_STATUS, "停止")
                 grp_btn = QPushButton("发送")
@@ -314,6 +353,7 @@ class SignalSimWidget(QWidget):
                     "timer": None, "sending": False, "item": grp_item,
                     "cycle_spin": cycle_spin, "status_item": grp_status,
                     "send_btn": grp_btn,
+                    "all_chk": all_chk, "show_all": False,
                 }
                 self._groups[frame_id] = grp
             grp["keys"].append(key)
@@ -364,7 +404,15 @@ class SignalSimWidget(QWidget):
                 "value_combo": value_combo, "manual_edit": manual_edit,
                 "ramp_chk": ramp_chk, "status_item": row,
                 "detail_item": row, "grp_item": grp["item"],
+                "extra": extra,
             }
+            # 补充行置灰，与用户已选信号区分
+            if extra:
+                self._mark_row_extra(key, True)
+                # 无枚举可选的补充信号会落到「手动模拟」，若留空则每次发送都
+                # 报“请填写手动值”并刷红一片。这里预填 0，用户可再改。
+                if not choices:
+                    manual_edit.setText("0")
             # 初始化手动值输入框可用状态（默认选枚举时禁用）
             self._on_value_mode_changed(key)
         self._refresh_group_summaries()
@@ -372,11 +420,42 @@ class SignalSimWidget(QWidget):
         # 新增信号不改变发送状态（未开始发送），但确保按钮与实际状态一致
         self._refresh_send_button()
 
+    def _on_show_all_toggled(self, frame_id: int, checked: bool):
+        """报文组「所有信号」勾选框：展开/收起该报文的全部 DBC 信号。
+
+        - 勾选：把该报文中尚未显示的信号作为「补充行」加入组内，可正常修改
+          模拟值 / 手动值 / 自动递增，并随整帧一起发送；
+        - 取消：只移除补充行，用户已选信号及其已填模拟值原样保留。
+        """
+        grp = self._groups.get(frame_id)
+        if grp is None:
+            return
+        grp["show_all"] = checked
+        if checked:
+            extras = [
+                k for k in self._all_keys_of_frame(frame_id)
+                if k not in self._row_data
+            ]
+            if extras:
+                self._add_table_rows(extras, extra=True)
+                grp["item"].setExpanded(True)
+                return
+        else:
+            extras = [k for k in list(grp["keys"]) if k not in self._sel_signals]
+            if extras:
+                self._remove_rows(set(extras))
+                return
+        self._refresh_group_summaries()
+
     def _refresh_group_summaries(self):
         """刷新各报文组的「信号数」概览列，便于一眼看清组内信号。"""
         for fid, grp in self._groups.items():
             n = len(grp["keys"])
-            grp["item"].setText(COL_FORMULA, f"{n} 个信号")
+            extra = sum(1 for k in grp["keys"] if k not in self._sel_signals)
+            grp["item"].setText(
+                COL_FORMULA,
+                f"{n} 个信号（含 {extra} 补充）" if extra else f"{n} 个信号",
+            )
 
     def _on_group_cycle_changed(self, frame_id: int):
         """组周期 SpinBox 变化时同步到组的周期值；运行中修改即时生效
@@ -394,26 +473,38 @@ class SignalSimWidget(QWidget):
             self._sel_list.addItem(item)
         self._sel_list.blockSignals(False)
 
+    def _destroy_group(self, frame_id: int):
+        """销毁整个报文组：停发、清理组内所有行（含「所有信号」补充行）。"""
+        grp = self._groups.pop(frame_id, None)
+        if grp is None:
+            return
+        # 先屏蔽「所有信号」勾选框的信号：销毁组会连带删除该控件，
+        # 避免析构过程中回调 _on_show_all_toggled 造成重入。
+        chk = grp.get("all_chk")
+        if chk is not None:
+            try:
+                chk.blockSignals(True)
+            except RuntimeError:  # 控件已被 Qt 释放
+                pass
+        if grp["timer"] is not None:
+            grp["timer"].stop()
+            grp["timer"].deleteLater()
+            grp["timer"] = None
+        grp["sending"] = False
+        for k in list(grp["keys"]):
+            self._row_data.pop(k, None)
+        idx = self._value_table.indexOfTopLevelItem(grp["item"])
+        if idx >= 0:
+            self._value_table.takeTopLevelItem(idx)
+
     def _remove_rows(self, keys: set):
         for key in keys:
             rd = self._row_data.pop(key, None)
             if rd is None:
                 continue
-            fid = rd["frame_id"]
-            grp = self._groups.get(fid)
-            if grp is not None:
-                if key in grp["keys"]:
-                    grp["keys"].remove(key)
-                # 若组正在发送且已无信号，停止并销毁组
-                if not grp["keys"]:
-                    if grp["timer"] is not None:
-                        grp["timer"].stop()
-                        grp["timer"].deleteLater()
-                    grp["sending"] = False
-                    self._groups.pop(fid, None)
-                    idx = self._value_table.indexOfTopLevelItem(grp["item"])
-                    if idx >= 0:
-                        self._value_table.takeTopLevelItem(idx)
+            grp = self._groups.get(rd["frame_id"])
+            if grp is not None and key in grp["keys"]:
+                grp["keys"].remove(key)
             # 从树中移除信号子行
             grp_item = rd.get("grp_item")
             if grp_item is not None:
@@ -422,6 +513,11 @@ class SignalSimWidget(QWidget):
                     if child.data(COL_SIG, Qt.UserRole) == key:
                         grp_item.takeChild(ci)
                         break
+        # 组内已无「用户已选」信号时整组销毁：否则勾了「所有信号」的组在用户
+        # 移除掉自己选的信号后，会只剩补充行留在表里空转、甚至继续参与发送。
+        for fid in list(self._groups.keys()):
+            if not any(k in self._sel_signals for k in self._groups[fid]["keys"]):
+                self._destroy_group(fid)
         self._refresh_group_summaries()
         # 移除信号可能删掉正在发送的报文组，需按实际状态刷新顶部按钮
         self._refresh_send_button()

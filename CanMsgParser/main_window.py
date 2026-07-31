@@ -108,12 +108,17 @@ class MainWindow(QMainWindow):
         QTabBar::tab {
             background-color: #252535;
             color: #9090a0;
-            padding: 8px 20px;
+            padding: 8px 10px;
             border: 1px solid #3a3a4e;
             border-bottom: none;
             margin-right: 2px;
             border-radius: 6px 6px 0 0;
             font-size: 13px;
+            /* Qt 按「文字宽度 + padding」精确裁剪页签，实测仅余 2px 余量，
+               emoji 走字体回退时实际渲染更宽，四/五字页签末字就被切掉。
+               这里用 min-width 兜出富余宽度（最长的「🔢 位图查看器」约 119px），
+               8 个页签合计约 1248px，仍小于主窗口最小宽度 1280px。 */
+            min-width: 132px;
         }
         QTabBar::tab:selected {
             background-color: #1e1e2e;
@@ -630,11 +635,10 @@ class MainWindow(QMainWindow):
         )
         self._search_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
 
-        # 初始并列停靠在左侧（构造期保持停靠，依附主窗口，避免闪现）。
+        # 初始纵向堆叠停靠在左侧（构造期保持停靠，依附主窗口，避免闪现）。
+        # 顺序固定为「信号分组在上、信号检索在下」，与浮动后的顺序保持一致。
         # 首次显示后在 showEvent 中由 _position_docks 浮出到主窗口左侧外部。
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
-        self.splitDockWidget(self._group_dock, self._search_dock, Qt.Horizontal)
+        self._stack_docks_left()
 
     def _setup_menu(self):
         """构建菜单栏"""
@@ -950,33 +954,63 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _stack_docks_left(self):
+        """把两个停靠窗按「信号分组在上、信号检索在下」纵向堆叠到左侧停靠区。
+
+        高度按 1:1 均分，避免分组窗被检索窗挤扁（分组窗内容本就偏少）。
+        """
+        self._group_dock.setFloating(False)
+        self._search_dock.setFloating(False)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
+        # splitDockWidget(first, second, Vertical) => first 在上、second 在下
+        self.splitDockWidget(self._group_dock, self._search_dock, Qt.Vertical)
+        try:
+            self.resizeDocks(
+                [self._group_dock, self._search_dock], [1, 1], Qt.Vertical
+            )
+        except (AttributeError, TypeError):  # Qt < 5.6 兜底
+            pass
+
+    def _dock_column_width(self) -> int:
+        """浮动列宽：取两个面板的建议宽度上限。
+
+        不能用 self._group_dock.width()：此刻两窗还挤在左侧停靠区内，
+        宽度远小于面板实际所需（实测分组面板 minimumSizeHint 宽达 706px），
+        用它定位会让两个浮动窗严重重叠 / 位置错乱。
+        """
+        def _need(panel) -> int:
+            return max(panel.sizeHint().width(), panel.minimumSizeHint().width())
+
+        return max(_need(self._group_panel), _need(self._search_panel), 340)
+
     def _position_docks(self):
-        """将两个停靠窗浮动到主窗口左侧外部（信号检索在内、信号分组在外）；
-        空间不足则停靠回左侧并纵向堆叠，保证两个视图都可见。"""
+        """将两个停靠窗浮动到主窗口左侧外部，纵向堆叠：
+        「信号分组」在上、「信号检索」在下；左侧空间不足则停靠回左侧并
+        纵向堆叠（顺序同样是分组在上），保证两个视图都可见且顺序一致。"""
         screen = QApplication.primaryScreen()
         if screen is None:
             return
         avail = screen.availableGeometry()
-        gw = self._group_dock.width() if self._group_dock.width() > 0 else 340
-        sw = self._search_dock.width() if self._search_dock.width() > 0 else 320
-        gh = max(420, int(avail.height() * 0.72))
-        x_group = self.x() - gw - 12
-        x_search = x_group - sw - 12
-        y = self.y() + 30
-        if x_search < avail.x():
-            # 左侧无足够空间，停靠回左侧并纵向堆叠
-            self._group_dock.setFloating(False)
-            self._search_dock.setFloating(False)
-            self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
-            self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
-            self.splitDockWidget(self._group_dock, self._search_dock, Qt.Vertical)
+        col_w = self._dock_column_width()
+        x = self.x() - col_w - 12
+        if x < avail.x():
+            # 左侧放不下整列，停靠回左侧并纵向堆叠
+            self._stack_docks_left()
             return
-        self._search_dock.setFloating(True)
-        self._search_dock.resize(sw, gh)
-        self._search_dock.move(x_search, y)
+        total_h = max(480, int(avail.height() * 0.90))
+        gap = 12
+        gh = (total_h - gap) // 2
+        sh = total_h - gap - gh
+        y = max(avail.y(), self.y())
+        # 分组在上
         self._group_dock.setFloating(True)
-        self._group_dock.resize(gw, gh)
-        self._group_dock.move(x_group, y)
+        self._group_dock.resize(col_w, gh)
+        self._group_dock.move(x, y)
+        # 检索在下
+        self._search_dock.setFloating(True)
+        self._search_dock.resize(col_w, sh)
+        self._search_dock.move(x, y + gh + gap)
 
     def showEvent(self, event):
         super().showEvent(event)
