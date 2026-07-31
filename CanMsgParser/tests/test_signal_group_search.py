@@ -1,55 +1,105 @@
 import os
 import sys
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt5.QtWidgets import QApplication
-from widgets.signal_group_panel import SignalGroupPanel
+from PyQt5.QtCore import Qt
+from widgets.signal_group_panel import SignalGroupPanel, SignalGroup, SignalRef
 
 app = QApplication.instance() or QApplication(sys.argv)
 
 
-def test_group_search_filter():
-    """Task #1：组内信号搜索框按信号名/报文名/备注内容过滤（不改动底层数据）。"""
+def _iter_signal_items(w):
+    """Iterate all signal items (top-level + cross-group children)."""
+    items = []
+    for i in range(w._sig_list.topLevelItemCount()):
+        top = w._sig_list.topLevelItem(i)
+        if top.data(0, Qt.UserRole) is not None:
+            items.append(top)
+        for j in range(top.childCount()):
+            child = top.child(j)
+            if child.data(0, Qt.UserRole) is not None:
+                items.append(child)
+    return items
+
+
+def _find(w, sig_name):
+    for it in _iter_signal_items(w):
+        sr = it.data(0, Qt.UserRole)
+        if sr is not None and sr.sig_name == sig_name:
+            return it
+    return None
+
+
+def _mk_widget():
     w = SignalGroupPanel()
-    w.add_signals([
-        ("MsgA", "SigOne", "0x100"),
-        ("MsgA", "SigTwo", "0x100"),
-    ])
-    # 给第二个信号加备注（需先构建列表后才能拿到 item 的 SignalRef）
-    grp = w._groups[0]
-    grp.signals[1].remark = "刹车助力模式"
+    # Provide matching DBC so signals become checkable
+    w._messages = [
+        SimpleNamespace(name="MsgA", signals=[
+            SimpleNamespace(name="SigOne"), SimpleNamespace(name="SigTwo")]),
+        SimpleNamespace(name="MsgB", signals=[SimpleNamespace(name="SigThree")]),
+    ]
+    w.add_signals([("MsgA", "SigOne", "0x100"), ("MsgA", "SigTwo", "0x100")])
+    # Second group containing SigThree
+    w._groups.append(SignalGroup(name="GroupB"))
+    w._groups[1].signals.append(SignalRef("MsgB", "SigThree", "0x200"))
+    w._groups[1].signals[0].remark = "backup brake signal"
     w._refresh_signal_list()
+    return w
 
-    assert w._sig_list.topLevelItemCount() == 2, "应有 2 个信号"
 
-    # 搜索信号名 SigOne -> 仅 SigOne 可见
-    w._sig_search.setText("SigOne")
-    assert w._sig_list.topLevelItem(0).isHidden() is False
-    assert w._sig_list.topLevelItem(1).isHidden() is True
-    print("    OK: 按信号名过滤 -> 仅 SigOne 可见")
+def test_group_search_cross_group():
+    """Cross-group search: filter by sig/msg/remark, grouped by owning group, data unchanged."""
+    w = _mk_widget()
+    # No search: current group (default) shows 2 top-level signal items
+    assert w._sig_list.topLevelItemCount() == 2, "no search should show current group 2 signals"
 
-    # 搜索报文名 MsgA -> 两个都可见
+    # Search signal name SigThree -> cross-group hit on GroupB only
+    w._sig_search.setText("SigThree")
+    assert w._sig_list.topLevelItemCount() == 1, "only GroupB matches -> 1 group header"
+    it = _find(w, "SigThree")
+    assert it is not None and not it.isHidden(), "SigThree should be visible"
+    assert _find(w, "SigOne") is None, "SigOne not in result"
+
+    # Search message name MsgA -> both default-group signals match
     w._sig_search.setText("MsgA")
-    assert w._sig_list.topLevelItem(0).isHidden() is False
-    assert w._sig_list.topLevelItem(1).isHidden() is False
-    print("    OK: 按报文名过滤 -> 全部可见")
+    assert _find(w, "SigOne") is not None and not _find(w, "SigOne").isHidden()
+    assert _find(w, "SigTwo") is not None and not _find(w, "SigTwo").isHidden()
+    assert _find(w, "SigThree") is None
 
-    # 搜索备注内容 -> 仅带该备注的 SigTwo 可见
-    w._sig_search.setText("刹车")
-    assert w._sig_list.topLevelItem(0).isHidden() is True
-    assert w._sig_list.topLevelItem(1).isHidden() is False
-    print("    OK: 按备注内容过滤 -> 仅 SigTwo 可见")
+    # Search remark -> only matching SigThree visible
+    w._sig_search.setText("backup brake")
+    it = _find(w, "SigThree")
+    assert it is not None and not it.isHidden()
+    assert _find(w, "SigOne") is None
 
-    # 清空搜索 -> 全部恢复可见，底层数据未变
+    # Clear -> restore current group fully visible, underlying data unchanged
     w._sig_search.setText("")
-    assert w._sig_list.topLevelItem(0).isHidden() is False
-    assert w._sig_list.topLevelItem(1).isHidden() is False
-    assert len(grp.signals) == 2, "过滤不应改动底层分组数据"
-    print("    OK: 清空搜索恢复可见，底层数据不变")
+    assert _find(w, "SigOne") is not None and not _find(w, "SigOne").isHidden()
+    assert _find(w, "SigTwo") is not None and not _find(w, "SigTwo").isHidden()
+    assert len(w._groups[0].signals) == 2, "filter must not alter underlying group data"
+    print("    OK: cross-group search filter + restore + data unchanged")
+
+
+def test_group_search_checkbox_reset_on_research():
+    """Re-search should reset checked state (single search keeps only current checks)."""
+    w = _mk_widget()
+    it = _find(w, "SigOne")
+    it.setCheckState(0, Qt.Checked)
+    assert ("MsgA", "SigOne") in w.get_checked_signals(), "SigOne should be checked"
+
+    # Re-search -> list rebuilt, checks cleared
+    w._sig_search.setText("Sig")
+    assert w.get_checked_signals() == [], "re-search should clear checks"
+    assert w._check_all_chk.isChecked() is False
+    assert w._uncheck_all_chk.isChecked() is False
+    print("    OK: re-search resets checkbox state")
 
 
 if __name__ == "__main__":
-    test_group_search_filter()
+    test_group_search_cross_group()
+    test_group_search_checkbox_reset_on_research()
     print("ALL GROUP SEARCH TESTS PASSED")

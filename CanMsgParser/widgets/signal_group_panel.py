@@ -1,13 +1,13 @@
 # widgets/signal_group_panel.py
-"""信号分组管理面板：创建/加载/保存分组，管理分组内信号勾选
+"""信号分组管理面板（"信号分组"视图）：创建/加载/保存分组，管理分组内信号勾选
 
 功能特性：
 - 多分组管理（新建、删除、切换）
 - JSON 配置文件保存/加载
 - DBC 匹配检查（未匹配信号置灰）
-- 全选/全不选/移除选中
-- 与信号树联动添加
-- 专业深色主题样式
+- 跨分组搜索（信号名 / 报文名 / 帧 ID / 备注）
+- 与"信号检索"视图联动：由信号检索视图的"加入分组"按钮将勾选信号加入当前分组
+- 专业深色主题样式（与信号检索视图共用 widgets/theme.DARK_PANEL_QSS）
 """
 import json
 from dataclasses import dataclass, field
@@ -15,12 +15,12 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton,
     QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
     QFileDialog, QLabel, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
-    QLineEdit,
+    QLineEdit, QCheckBox,
 )
 from PyQt5.QtCore import pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QFont
 from core.can_data import MessageDef
-from widgets.signal_tree import SignalTreeWidget
+from widgets.theme import DARK_PANEL_QSS
 from widgets.del_key_filter import DelKeyFilter
 
 
@@ -41,7 +41,7 @@ class SignalGroup:
 
 
 class SignalGroupPanel(QWidget):
-    """信号分组管理面板，嵌入曲线图 Tab 内"""
+    """信号分组管理面板（独立停靠视图"信号分组"）"""
 
     # 组内勾选状态变化时发射（参数为当前分组已勾选的信号列表）
     checked_changed = pyqtSignal(list)
@@ -50,88 +50,12 @@ class SignalGroupPanel(QWidget):
     # 分发信号到曲线图/实时监控/模拟上报页：(target, [(msg_name, sig_name), ...])
     dispatch_requested = pyqtSignal(str, list)
 
-    # ─── QSS 样式表（与设计系统一致） ───
-    _QSS = """
-        QWidget {
-            background-color: #1e1e2e;
-            color: #e0e0e0;
-            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-            font-size: 13px;
-        }
-        QLabel {
-            color: #9090a0;
-            font-weight: 500;
-            padding: 0 4px;
-        }
-        QComboBox {
-            background-color: #2a2a3e;
-            color: #e0e0e0;
-            border: 1px solid #3a3a4e;
-            border-radius: 4px;
-            padding: 6px 12px;
-            min-height: 28px;
-        }
-        QComboBox:hover {
-            border-color: #4fc3f7;
-        }
-        QComboBox::drop-down {
-            border: none;
-            width: 24px;
-        }
-        QComboBox QAbstractItemView {
-            background-color: #252535;
-            color: #e0e0e0;
-            selection-background-color: #1e3a5a;
-            selection-color: #4fc3f7;
-            border: 1px solid #3a3a4e;
-            outline: none;
-        }
-        QPushButton {
-            background-color: #3a3a4e;
-            color: #e0e0e0;
-            border: 1px solid #4a4a5e;
-            border-radius: 4px;
-            padding: 6px 14px;
-            min-height: 28px;
-            font-weight: 500;
-        }
-        QPushButton:hover {
-            background-color: #4a4a5e;
-            border-color: #4fc3f7;
-        }
-        QPushButton:pressed {
-            background-color: #2a2a3e;
-        }
-        QListWidget {
-            background-color: #1e1e2e;
-            alternate-background-color: #252535;
-            color: #e0e0e0;
-            border: 1px solid #3a3a4e;
-            border-radius: 4px;
-            padding: 4px;
-            outline: none;
-        }
-        QListWidget::item {
-            padding: 5px 8px;
-        }
-        QTreeWidget::item {
-            min-height: 28px;
-            padding: 7px 8px;
-        }
-        QListWidget::item:selected {
-            background-color: #1e3a5a;
-            color: #4fc3f7;
-        }
-        QListWidget::item:hover {
-            background-color: #2a2a4e;
-        }
-    """
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._groups: list[SignalGroup] = []
         self._current_group_idx: int = -1
         self._messages: list[MessageDef] = []  # 当前 DBC 报文定义
+        self._search_text: str = ""  # 跨分组搜索关键字（已转小写）
         # 自动保存：已知配置文件路径 + 脏标记（备注/增删/改组触发）
         self._config_path: str = ""
         self._dirty: bool = False
@@ -140,7 +64,7 @@ class SignalGroupPanel(QWidget):
         self._autosave_timer.timeout.connect(self._autosave)
         self._autosave_timer.start()
 
-        self.setStyleSheet(self._QSS)
+        self.setStyleSheet(DARK_PANEL_QSS)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -148,20 +72,7 @@ class SignalGroupPanel(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        # ─── 内嵌信号搜索树（公共搜索入口，自带分发按钮）───
-        self._embed_tree = SignalTreeWidget()
-        # 搜索树的分发信号直接转发给本面板的 dispatch_requested
-        self._embed_tree.dispatch_requested.connect(self.dispatch_requested)
-        layout.addWidget(self._embed_tree, stretch=4)
-
-        # 把搜索树中勾选的信号加入当前分组
-        self._add_tree_to_group_btn = QPushButton("加入分组")
-        self._add_tree_to_group_btn.setProperty("class", "primary")
-        self._add_tree_to_group_btn.setToolTip("将上方搜索树中勾选的信号加入当前分组")
-        self._add_tree_to_group_btn.clicked.connect(self._add_tree_to_group)
-        layout.addWidget(self._add_tree_to_group_btn)
-
-        # ─── 分组选择栏（移到搜索树与“加入分组”按钮下方）───
+        # ─── 分组选择栏 ───
         group_bar = QHBoxLayout()
         group_bar.setSpacing(8)
 
@@ -201,46 +112,39 @@ class SignalGroupPanel(QWidget):
         group_bar.addStretch()
         layout.addLayout(group_bar)
 
-        # ─── 组内信号搜索框（Task #1：按信号名 / 报文名 / 备注内容过滤）───
+        # ─── 组内信号搜索框（跨分组搜索：信号名 / 报文名 / 帧 ID / 备注）───
         self._sig_search = QLineEdit()
-        self._sig_search.setPlaceholderText("🔍 搜索信号名 / 报文名 / 备注…")
+        self._sig_search.setPlaceholderText("🔍 搜索信号名 / 报文名 / 备注（跨分组）…")
         self._sig_search.textChanged.connect(self._on_group_search)
         layout.addWidget(self._sig_search)
 
-        # ─── 信号列表（Issue 4：树形两列——信号名 + 可编辑备注）───
+        # ─── 信号列表（跨分组搜索时按所属分组归类；备注列可编辑）───
         self._sig_list = QTreeWidget()
         self._sig_list.setColumnCount(2)
         self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
         self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._sig_list.setAlternatingRowColors(True)
-        self._sig_list.setMaximumHeight(180)
-        self._sig_list.setColumnWidth(0, 280)
+        self._sig_list.setColumnWidth(0, 300)
         self._sig_list.setColumnWidth(1, 220)
         self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._sig_list.itemChanged.connect(self._on_sig_checked)
-        layout.addWidget(self._sig_list, stretch=1)
+        layout.addWidget(self._sig_list, stretch=3)
 
-        # ─── 操作按钮栏 ───
-        action_bar = QHBoxLayout()
-        action_bar.setSpacing(8)
-
-        self._remove_btn = QPushButton("移除选中")
-        self._remove_btn.setToolTip("从当前分组中移除选中的信号")
-        self._remove_btn.clicked.connect(self._remove_selected)
-        action_bar.addWidget(self._remove_btn)
-
-        self._select_all_btn = QPushButton("全选")
-        self._select_all_btn.setToolTip("勾选当前分组中所有可用信号")
-        self._select_all_btn.clicked.connect(self._select_all_signals)
-        action_bar.addWidget(self._select_all_btn)
-
-        self._deselect_all_btn = QPushButton("全不选")
-        self._deselect_all_btn.setToolTip("取消所有信号的勾选")
-        self._deselect_all_btn.clicked.connect(self._deselect_all_signals)
-        action_bar.addWidget(self._deselect_all_btn)
-
-        action_bar.addStretch()
-        layout.addLayout(action_bar)
+        # ─── 操作栏：全选 / 取消全选（与信号检索视图一致的勾选框）───
+        sel_bar = QHBoxLayout()
+        sel_bar.setSpacing(8)
+        self._check_all_chk = QCheckBox("全选")
+        self._check_all_chk.stateChanged.connect(
+            lambda _s: self._on_check_all(self._check_all_chk.isChecked())
+        )
+        self._uncheck_all_chk = QCheckBox("取消全选")
+        self._uncheck_all_chk.stateChanged.connect(
+            lambda _s: self._on_uncheck_all(self._uncheck_all_chk.isChecked())
+        )
+        sel_bar.addWidget(self._check_all_chk)
+        sel_bar.addWidget(self._uncheck_all_chk)
+        sel_bar.addStretch()
+        layout.addLayout(sel_bar)
 
         # ─── 分组内信号分发按钮（作用于分组中已勾选的信号）───
         group_dispatch_bar = QHBoxLayout()
@@ -257,25 +161,27 @@ class SignalGroupPanel(QWidget):
             group_dispatch_bar.addWidget(_btn)
         layout.addLayout(group_dispatch_bar)
 
-        # 勾选变化通知（供曲线图/实时监控/模拟上报页联动）
-        self._sig_list.itemChanged.connect(self._on_sig_checked)
-
-        # Delete 键移除选中信号（等价于「移除选中」按钮）
+        # Delete 键移除选中信号（保留既有 DEL 快捷键移除能力）
         self._del_filter = DelKeyFilter(self._sig_list, self._remove_selected)
 
     # ────────────────────── 公共接口 ──────────────────────
 
     def set_messages(self, messages: list[MessageDef]):
-        """更新当前 DBC 报文定义，用于匹配检查，并同步给内嵌搜索树"""
+        """更新当前 DBC 报文定义，用于匹配检查。"""
         self._messages = messages
-        self._embed_tree.load_messages(messages)
         self._refresh_signal_list()
 
-    def add_signals(self, signals: list[tuple[str, str, str]]):
-        """批量添加信号到当前分组（由各页的"添加到分组"按钮调用）。
+    def add_signals(self, signals):
+        """批量添加信号到当前分组。
+
+        兼容两种调用约定：
+        - 来自"信号检索"视图的联动：[(msg_name, sig_name), ...]（2 元组），
+          frame_id 自动从已加载 DBC（set_messages）查得；
+        - 历史/单测直接调用：[(msg_name, sig_name, frame_id_hex), ...]（3 元组），
+          以传入的 frame_id 为准。
 
         Args:
-            signals: [(msg_name, sig_name, frame_id_hex), ...]
+            signals: [(msg_name, sig_name)] 或 [(msg_name, sig_name, frame_id_hex)]
         """
         # 若还没有任何分组，自动创建一个默认分组，避免无目标可添加
         if self._current_group_idx < 0:
@@ -287,7 +193,13 @@ class SignalGroupPanel(QWidget):
         existing = {(s.msg_name, s.sig_name) for s in group.signals}
 
         added = False
-        for msg_name, sig_name, frame_id in signals:
+        for sig in signals:
+            if len(sig) >= 3:
+                msg_name, sig_name, frame_id = sig[0], sig[1], sig[2]
+            else:
+                msg_name, sig_name = sig[0], sig[1]
+                # 2 元组（来自信号检索视图联动）：从已加载 DBC 反查帧 ID
+                frame_id = self._lookup_frame_id(msg_name, sig_name)
             if (msg_name, sig_name) not in existing:
                 group.signals.append(SignalRef(msg_name, sig_name, frame_id))
                 added = True
@@ -299,6 +211,21 @@ class SignalGroupPanel(QWidget):
         idx = self._current_group_idx
         self._group_combo.setItemText(idx, f"{group.name} ({len(group.signals)} 信号)")
 
+    def _lookup_frame_id(self, msg_name: str, sig_name: str) -> str:
+        """从已加载 DBC（self._messages）反查信号的帧 ID（hex 字符串）。
+
+        用于"信号检索"视图以 (msg_name, sig_name) 2 元组传入时的联动；
+        DBC 未加载或查不到时返回空串，避免崩溃。
+        """
+        for msg in self._messages:
+            if getattr(msg, "name", None) != msg_name:
+                continue
+            fid = getattr(msg, "frame_id", None)
+            if isinstance(fid, int):
+                return f"0x{fid:03X}"
+            return str(fid) if fid else ""
+        return ""
+
     def get_current_group_name(self) -> str:
         """返回当前选中分组名称，无分组时返回空字符串"""
         if 0 <= self._current_group_idx < len(self._groups):
@@ -306,31 +233,23 @@ class SignalGroupPanel(QWidget):
         return ""
 
     def get_checked_signals(self) -> list[tuple[str, str]]:
-        """返回当前分组中已勾选的 (msg_name, sig_name) 列表"""
+        """返回当前列表中已勾选的 (msg_name, sig_name) 列表（含跨分组子项）"""
         result = []
         for i in range(self._sig_list.topLevelItemCount()):
-            item = self._sig_list.topLevelItem(i)
-            if (item.flags() & Qt.ItemIsUserCheckable) and item.checkState(0) == Qt.Checked:
-                sig_ref = item.data(0, Qt.UserRole)
-                if sig_ref is not None:
-                    result.append((sig_ref.msg_name, sig_ref.sig_name))
+            top = self._sig_list.topLevelItem(i)
+            sig_ref = top.data(0, Qt.UserRole)
+            if sig_ref is not None and (top.flags() & Qt.ItemIsUserCheckable) \
+                    and top.checkState(0) == Qt.Checked:
+                result.append((sig_ref.msg_name, sig_ref.sig_name))
+            for j in range(top.childCount()):
+                child = top.child(j)
+                cs = child.data(0, Qt.UserRole)
+                if cs is not None and (child.flags() & Qt.ItemIsUserCheckable) \
+                        and child.checkState(0) == Qt.Checked:
+                    result.append((cs.msg_name, cs.sig_name))
         return result
 
     # ────────────────────── 分发 / 添加 ──────────────────────
-
-    def _add_tree_to_group(self):
-        """把内嵌搜索树中勾选的信号加入当前分组"""
-        checked = self._embed_tree.get_checked_signals()
-        if not checked:
-            QMessageBox.information(self, "提示", "请先在搜索树中勾选信号")
-            return
-        msg_lookup = {m.name: m for m in self._messages}
-        signals = []
-        for msg_name, sig_name in checked:
-            msg = msg_lookup.get(msg_name)
-            frame_id_hex = f"0x{msg.frame_id:03X}" if msg else ""
-            signals.append((msg_name, sig_name, frame_id_hex))
-        self.add_signals(signals)
 
     def _on_group_dispatch(self, target: str):
         """把分组中已勾选的信号分发到指定目标页"""
@@ -381,122 +300,175 @@ class SignalGroupPanel(QWidget):
         self._refresh_signal_list()
 
     def _refresh_signal_list(self):
-        """刷新信号列表（Issue 4：两列树形），检查 DBC 匹配状态
+        """刷新信号列表。
 
-        备注列用 setItemWidget 嵌入 QLineEdit（本环境 QTreeWidgetItem 的
-        flags/setFlags 不支持列参数，故不用 per-column 可编辑标志，改用
-        控件更稳定可靠）。
+        - 无搜索：显示当前分组信号（顶层项）。
+        - 跨分组搜索：遍历所有分组，命中信号按所属分组以「分组标题 + 子项」呈现。
+        两种方式均不改动底层分组数据；每次重建会重置勾选状态
+        （单次搜索仅保留当前勾选，满足"重新搜索即恢复不勾选"）。
         """
-        # 构建期间屏蔽勾选信号，避免刷新触发 checked_changed 误报
         self._sig_list.blockSignals(True)
         self._sig_list.clear()
-        if self._current_group_idx < 0:
-            self._sig_list.blockSignals(False)
-            return
-
-        group = self._groups[self._current_group_idx]
 
         # 构建 DBC 查找索引
         dbc_lookup = {}
         for msg in self._messages:
             for sig in msg.signals:
                 dbc_lookup[(msg.name, sig.name)] = True
+        self._dbc_lookup = dbc_lookup
 
-        for sig_ref in group.signals:
-            key = (sig_ref.msg_name, sig_ref.sig_name)
-            matched = key in dbc_lookup
+        text = self._search_text
+        if text:
+            # 跨分组搜索：遍历所有分组，命中信号按所属分组归类展示
+            for g in self._groups:
+                matches = [s for s in g.signals if self._match_sig(s, text)]
+                if not matches:
+                    continue
+                header = QTreeWidgetItem(self._sig_list)
+                header.setText(0, f"{g.name}  ({len(matches)} 信号)")
+                header.setFlags(
+                    header.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsUserCheckable
+                )
+                header.setForeground(0, QColor("#9090a0"))
+                hf = header.font(0)
+                hf.setBold(True)
+                header.setFont(0, hf)
+                for sig_ref in matches:
+                    self._add_signal_item(header, sig_ref)
+            self._sig_list.expandAll()
+        else:
+            if self._current_group_idx < 0:
+                self._sig_list.blockSignals(False)
+                self._check_all_chk.setChecked(False)
+                self._uncheck_all_chk.setChecked(False)
+                return
+            g = self._groups[self._current_group_idx]
+            for sig_ref in g.signals:
+                self._add_signal_item(None, sig_ref)
 
-            item = QTreeWidgetItem()
-            item.setText(0, f"{sig_ref.sig_name}  ({sig_ref.msg_name} · {sig_ref.frame_id})")
-            item.setData(0, Qt.UserRole, sig_ref)
-
-            if matched:
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.Unchecked)
-            else:
-                # 置灰不可勾选
-                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsEnabled)
-                item.setToolTip(0, "当前 DBC 中未找到此信号")
-                item.setForeground(0, QColor("#555560"))
-
-            self._sig_list.addTopLevelItem(item)
-
-            # 备注列：可编辑 QLineEdit（Issue 4）
-            le = QLineEdit(sig_ref.remark or "")
-            le.setPlaceholderText("描述信号功能")
-            le.setMinimumHeight(26)  # Task #4：增大备注编辑框行高，避免文字显示不全
-            le.setEnabled(matched)
-            le.editingFinished.connect(
-                lambda _checked=False, it=item, w=le: self._on_remark_edited(it, w)
-            )
-            self._sig_list.setItemWidget(item, 1, le)
         self._sig_list.blockSignals(False)
-        # 重建后重新应用搜索过滤（Task #1）
-        self._on_group_search(self._sig_search.text())
+        # 重新搜索 -> 勾选框归位（单次搜索仅保留当前勾选）
+        self._check_all_chk.setChecked(False)
+        self._uncheck_all_chk.setChecked(False)
+
+    def _match_sig(self, sig_ref: SignalRef, text: str) -> bool:
+        """按信号名 / 报文名 / 帧 ID / 备注内容匹配（不区分大小写）。"""
+        if not text:
+            return True
+        hay = " ".join([
+            sig_ref.sig_name, sig_ref.msg_name, sig_ref.frame_id, sig_ref.remark or ""
+        ]).lower()
+        return text in hay
+
+    def _add_signal_item(self, parent, sig_ref: SignalRef):
+        """构建单个信号项（可置于列表顶层或某分组标题下），含可编辑备注列。"""
+        item = QTreeWidgetItem(parent) if parent is not None \
+            else QTreeWidgetItem(self._sig_list)
+        item.setText(0, f"{sig_ref.sig_name}  ({sig_ref.msg_name} · {sig_ref.frame_id})")
+        item.setData(0, Qt.UserRole, sig_ref)
+
+        matched = (sig_ref.msg_name, sig_ref.sig_name) in self._dbc_lookup
+        if matched:
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            item.setCheckState(0, Qt.Unchecked)
+        else:
+            # 置灰不可勾选
+            item.setFlags(
+                item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsEnabled
+            )
+            item.setToolTip(0, "当前 DBC 中未找到此信号")
+            item.setForeground(0, QColor("#555560"))
+
+        # 备注列：可编辑 QLineEdit（增大行高避免文字显示不全）
+        le = QLineEdit(sig_ref.remark or "")
+        le.setPlaceholderText("描述信号功能")
+        le.setMinimumHeight(26)
+        le.setEnabled(matched)
+        le.editingFinished.connect(
+            lambda _checked=False, it=item, w=le: self._on_remark_edited(it, w)
+        )
+        self._sig_list.setItemWidget(item, 1, le)
+        return item
 
     # ────────────────────── 信号操作 ──────────────────────
 
     def _on_sig_checked(self, item, column):
-        """组内信号勾选变化：通知外部页面联动刷新（备注编辑由 _on_remark_edited 处理）"""
+        """组内信号勾选变化：通知外部页面联动刷新"""
         self.checked_changed.emit(self.get_checked_signals())
 
     def _on_group_search(self, text: str):
-        """Task #1：按信号名 / 报文名 / 备注内容过滤组内信号列表（不改动底层数据）。
+        """跨分组搜索：按信号名 / 报文名 / 备注过滤（不改动底层数据）。
 
-        仅改变行的隐藏状态；底层 group.signals 保持不变，DEL 移除等逻辑只
-        作用于当前可见（未隐藏）的选中项。
+        每次重新搜索重建列表 -> 已勾选状态归零（单次搜索仅保留当前勾选）。
         """
-        text = (text or "").strip().lower()
-        for i in range(self._sig_list.topLevelItemCount()):
-            item = self._sig_list.topLevelItem(i)
-            sig_ref = item.data(0, Qt.UserRole)
-            if not text:
-                item.setHidden(False)
-                continue
-            haystack = item.text(0).lower()
-            if sig_ref is not None:
-                haystack += " " + (sig_ref.remark or "").lower()
-            item.setHidden(text not in haystack)
+        self._search_text = (text or "").strip().lower()
+        self._refresh_signal_list()
 
     def _on_remark_edited(self, item, line_edit):
-        """Issue 4：备注编辑完成——写回 SignalRef 并标记脏（触发自动保存）。"""
+        """备注编辑完成——写回 SignalRef 并标记脏（触发自动保存）。"""
         sig_ref = item.data(0, Qt.UserRole)
         if sig_ref is not None:
             sig_ref.remark = line_edit.text().strip()
             self._dirty = True
 
     def _remove_selected(self):
-        """移除选中的信号"""
-        if self._current_group_idx < 0:
+        """移除选中的信号（跨分组安全：定位其所属分组后删除）。"""
+        selected = self._sig_list.selectedItems()
+        if not selected:
             return
 
-        group = self._groups[self._current_group_idx]
-        selected = self._sig_list.selectedItems()
+        changed = False
         for item in selected:
             sig_ref = item.data(0, Qt.UserRole)
-            group.signals = [s for s in group.signals if not (
-                s.msg_name == sig_ref.msg_name and s.sig_name == sig_ref.sig_name
-            )]
+            if sig_ref is None:
+                continue
+            for g in self._groups:
+                before = len(g.signals)
+                g.signals = [
+                    s for s in g.signals
+                    if not (s.msg_name == sig_ref.msg_name
+                            and s.sig_name == sig_ref.sig_name)
+                ]
+                if len(g.signals) != before:
+                    changed = True
 
-        self._dirty = True
-        self._refresh_signal_list()
-        # 更新 combo 显示
-        idx = self._current_group_idx
-        self._group_combo.setItemText(idx, f"{group.name} ({len(group.signals)} 信号)")
+        if changed:
+            self._dirty = True
+            self._refresh_signal_list()
+            for idx, g in enumerate(self._groups):
+                self._group_combo.setItemText(
+                    idx, f"{g.name} ({len(g.signals)} 信号)"
+                )
 
-    def _select_all_signals(self):
-        """全选当前分组中所有可勾选的信号"""
+    def _on_check_all(self, checked: bool):
+        """勾选「全选」：勾选当前所有可见信号。"""
+        if not checked:
+            return  # 取消动作交给「取消全选」勾选框负责
+        self._set_visible_checked(True)
+        self._uncheck_all_chk.blockSignals(True)
+        self._uncheck_all_chk.setChecked(False)
+        self._uncheck_all_chk.blockSignals(False)
+
+    def _on_uncheck_all(self, checked: bool):
+        """勾选「取消全选」：取消当前所有可见信号的勾选。"""
+        if not checked:
+            return
+        self._set_visible_checked(False)
+        self._check_all_chk.blockSignals(True)
+        self._check_all_chk.setChecked(False)
+        self._check_all_chk.blockSignals(False)
+
+    def _set_visible_checked(self, checked: bool):
+        """批量设置当前可见（未隐藏）信号项的勾选状态。"""
+        self._sig_list.blockSignals(True)
         for i in range(self._sig_list.topLevelItemCount()):
-            item = self._sig_list.topLevelItem(i)
-            if item.flags() & Qt.ItemIsUserCheckable:
-                item.setCheckState(0, Qt.Checked)
-
-    def _deselect_all_signals(self):
-        """全不选"""
-        for i in range(self._sig_list.topLevelItemCount()):
-            item = self._sig_list.topLevelItem(i)
-            if item.flags() & Qt.ItemIsUserCheckable:
-                item.setCheckState(0, Qt.Unchecked)
+            top = self._sig_list.topLevelItem(i)
+            items = [top] + [top.child(k) for k in range(top.childCount())]
+            for it in items:
+                if (it.flags() & Qt.ItemIsUserCheckable) and not it.isHidden():
+                    it.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+        self._sig_list.blockSignals(False)
+        self._on_sig_checked(None, 0)
 
     # ────────────────────── 配置文件保存/加载 ──────────────────────
 
@@ -540,7 +512,7 @@ class SignalGroupPanel(QWidget):
             json.dump(config, f, ensure_ascii=False, indent=2)
 
     def _autosave(self):
-        """Issue 4：定时检查脏标记，若已设置配置文件路径则静默自动保存。"""
+        """定时检查脏标记，若已设置配置文件路径则静默自动保存。"""
         if not self._dirty or not self._config_path:
             return
         try:
