@@ -3,6 +3,17 @@
 import os
 import sys
 import time
+
+# ── 高 DPI / 多屏自适应：必须在导入 PyQt5 之前设置环境变量 ──
+# QT_AUTO_SCREEN_SCALE_FACTOR=1              → 启用「按屏幕」自动缩放，窗口移到不同
+#   DPI 的屏幕时 Qt 自动重算缩放比例（解决小分辨率屏上按钮/图表过大的问题）
+# QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough → 使用精确（非整数）缩放比例，避免
+#   分辨率/缩放变化后输入映射与渲染比例不一致导致的鼠标点击错位
+# QT_ENABLE_HIGHDPI_SCALING=1              → 与下方 AA_EnableHighDpiScaling 等效的开关
+os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
 

@@ -56,6 +56,11 @@ def build():
         "--noconsole",                    # 明确指定无控制台
         "--name", APP_NAME,
 
+        # 高 DPI / 多屏自适应：嵌入声明 PerMonitorV2 的清单，使 Windows 按真实
+        # 每屏 DPI 向窗口发送 WM_DPICHANGED，彻底修复「小分辨率屏 UI 过大」与
+        # 「锁屏解锁后鼠标点击偏移」两类问题（详见 app.manifest）
+        "--manifest", "app.manifest",
+
         # 隐藏导入 — 这些库有动态导入，PyInstaller 可能漏掉
         "--hidden-import", "PyQt5.QtCore",
         "--hidden-import", "PyQt5.QtGui",
