@@ -14,12 +14,28 @@ import time
 import tempfile
 import os
 
+import pytest
 from PyQt5.QtCore import QCoreApplication
 
 import can
 from core.can_connection import CanConnectionManager
 from workers.can_capture_worker import CanCaptureWorker
 from workers.can_raw_capture_worker import CanRawCaptureWorker
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _qcore_app():
+    """确保隔离运行（如 pytest 单文件单进程）时存在 QCoreApplication 实例。
+
+    本文件 test_dispatch_sim_frame_to_monitor 通过
+    QCoreApplication.instance().processEvents() 驱动 signal/slot 分发；
+    若进程内无 app 实例，instance() 返回 None，会触发
+    'NoneType' object has no attribute 'processEvents'。该装置统一补齐实例。
+    """
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication(sys.argv)
+    yield app
 
 
 DBC_TEXT = """VERSION ""
