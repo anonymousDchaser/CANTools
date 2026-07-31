@@ -636,7 +636,7 @@ class MainWindow(QMainWindow):
         self._search_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
 
         # 初始纵向堆叠停靠在左侧（构造期保持停靠，依附主窗口，避免闪现）。
-        # 顺序固定为「信号分组在上、信号检索在下」，与浮动后的顺序保持一致。
+        # 顺序固定为「信号检索在上、信号分组在下」，与浮动后的顺序保持一致。
         # 首次显示后在 showEvent 中由 _position_docks 浮出到主窗口左侧外部。
         self._stack_docks_left()
 
@@ -955,19 +955,19 @@ class MainWindow(QMainWindow):
                 pass
 
     def _stack_docks_left(self):
-        """把两个停靠窗按「信号分组在上、信号检索在下」纵向堆叠到左侧停靠区。
+        """把两个停靠窗按「信号检索在上、信号分组在下」纵向堆叠到左侧停靠区。
 
-        高度按 1:1 均分，避免分组窗被检索窗挤扁（分组窗内容本就偏少）。
+        高度按 1:1 均分。
         """
-        self._group_dock.setFloating(False)
         self._search_dock.setFloating(False)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
+        self._group_dock.setFloating(False)
         self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
         # splitDockWidget(first, second, Vertical) => first 在上、second 在下
-        self.splitDockWidget(self._group_dock, self._search_dock, Qt.Vertical)
+        self.splitDockWidget(self._search_dock, self._group_dock, Qt.Vertical)
         try:
             self.resizeDocks(
-                [self._group_dock, self._search_dock], [1, 1], Qt.Vertical
+                [self._search_dock, self._group_dock], [1, 1], Qt.Vertical
             )
         except (AttributeError, TypeError):  # Qt < 5.6 兜底
             pass
@@ -986,8 +986,8 @@ class MainWindow(QMainWindow):
 
     def _position_docks(self):
         """将两个停靠窗浮动到主窗口左侧外部，纵向堆叠：
-        「信号分组」在上、「信号检索」在下；左侧空间不足则停靠回左侧并
-        纵向堆叠（顺序同样是分组在上），保证两个视图都可见且顺序一致。"""
+        「信号检索」在上、「信号分组」在下；左侧空间不足则停靠回左侧并
+        纵向堆叠（顺序同样是检索在上），保证两个视图都可见且顺序一致。"""
         screen = QApplication.primaryScreen()
         if screen is None:
             return
@@ -1003,14 +1003,14 @@ class MainWindow(QMainWindow):
         gh = (total_h - gap) // 2
         sh = total_h - gap - gh
         y = max(avail.y(), self.y())
-        # 分组在上
-        self._group_dock.setFloating(True)
-        self._group_dock.resize(col_w, gh)
-        self._group_dock.move(x, y)
-        # 检索在下
+        # 检索在上
         self._search_dock.setFloating(True)
-        self._search_dock.resize(col_w, sh)
-        self._search_dock.move(x, y + gh + gap)
+        self._search_dock.resize(col_w, gh)
+        self._search_dock.move(x, y)
+        # 分组在下
+        self._group_dock.setFloating(True)
+        self._group_dock.resize(col_w, sh)
+        self._group_dock.move(x, y + gh + gap)
 
     def showEvent(self, event):
         super().showEvent(event)
