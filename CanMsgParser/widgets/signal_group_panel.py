@@ -118,19 +118,7 @@ class SignalGroupPanel(QWidget):
         self._sig_search.textChanged.connect(self._on_group_search)
         layout.addWidget(self._sig_search)
 
-        # ─── 信号列表（跨分组搜索时按所属分组归类；备注列可编辑）───
-        self._sig_list = QTreeWidget()
-        self._sig_list.setColumnCount(2)
-        self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
-        self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._sig_list.setAlternatingRowColors(True)
-        self._sig_list.setColumnWidth(0, 300)
-        self._sig_list.setColumnWidth(1, 220)
-        self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._sig_list.itemChanged.connect(self._on_sig_checked)
-        layout.addWidget(self._sig_list, stretch=3)
-
-        # ─── 操作栏：全选 / 取消全选（与信号检索视图一致的勾选框）───
+        # ─── 全选 / 取消全选（紧贴搜索框下方，与信号检索视图一致的勾选框）───
         sel_bar = QHBoxLayout()
         sel_bar.setSpacing(8)
         self._check_all_chk = QCheckBox("全选")
@@ -145,6 +133,18 @@ class SignalGroupPanel(QWidget):
         sel_bar.addWidget(self._uncheck_all_chk)
         sel_bar.addStretch()
         layout.addLayout(sel_bar)
+
+        # ─── 信号列表（跨分组搜索时按所属分组归类；备注列可编辑）───
+        self._sig_list = QTreeWidget()
+        self._sig_list.setColumnCount(2)
+        self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
+        self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._sig_list.setAlternatingRowColors(True)
+        self._sig_list.setColumnWidth(0, 300)
+        self._sig_list.setColumnWidth(1, 220)
+        self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._sig_list.itemChanged.connect(self._on_sig_checked)
+        layout.addWidget(self._sig_list, stretch=3)
 
         # ─── 分组内信号分发按钮（作用于分组中已勾选的信号）───
         group_dispatch_bar = QHBoxLayout()
