@@ -44,10 +44,22 @@ def load_log_file(file_path: str, progress_callback=None) -> tuple[pd.DataFrame,
         empty_df = pd.DataFrame(columns=["frame_id", "timestamp", "arbitration_id", "dlc", "channel", "is_fd"])
         return empty_df, np.empty((0, 8), dtype=np.uint8)
 
+    # 统一时间原点：BLF 用测量开始时间(start_timestamp)，其它格式(ASC 等)回落到首帧。
+    # 这样消息表与信号曲线共用同一时间轴(t=0 为测量开始)，与市场工具(TSMaster 等)
+    # 一致；且不同信号的时间原点相同，下发信号与上报信号的反馈时长可直接相减比较。
+    start_ts = getattr(reader, "start_timestamp", None)
+    raw_ts = np.asarray(timestamps, dtype=np.float64)
+    first_ts = float(raw_ts[0]) if raw_ts.size else 0.0
+    if start_ts is not None and start_ts > 0 and start_ts <= first_ts:
+        t0 = float(start_ts)
+    else:
+        t0 = first_ts
+    norm_ts = raw_ts - t0
+
     num_frames = len(timestamps)
     frame_index = pd.DataFrame({
         "frame_id": np.arange(num_frames, dtype=np.int64),
-        "timestamp": np.array(timestamps, dtype=np.float64),
+        "timestamp": norm_ts,
         "arbitration_id": np.array(arb_ids, dtype=np.uint32),
         "dlc": np.array(dlcs, dtype=np.uint8),
         "channel": np.array(channels, dtype=np.int32),
