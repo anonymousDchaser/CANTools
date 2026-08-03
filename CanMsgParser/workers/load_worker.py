@@ -102,8 +102,9 @@ class DecodeWorker(QThread):
 
             ts_arr = np.array(timestamps, dtype=np.float64)
             val_arr = np.array(values, dtype=np.float64)
-            if len(ts_arr) > 0:
-                ts_arr -= ts_arr[0]
+            # 注意：时间戳已在 log_loader 中统一归一到测量起点(t0)，
+            # 此处【不再】按本信号首帧二次归零，否则不同信号时间原点不一致，
+            # 会导致下发/上报信号反馈时长计算错误、与 TSMaster 等工具对不上。
 
             self._cache.put(self._msg_name, self._sig_name, ts_arr, val_arr)
 
