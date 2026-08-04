@@ -134,6 +134,8 @@ class RealtimeMonitorWidget(QWidget):
                 added = True
         if added:
             self._refresh_sel_list()
+            # 监控进行中加入信号：同步进采集与曲线（曲线/采集各自去重）
+            self._sync_monitor_signals()
 
     def _refresh_sel_list(self):
         self._sel_list.blockSignals(True)
@@ -148,10 +150,33 @@ class RealtimeMonitorWidget(QWidget):
         for item in self._sel_list.selectedItems():
             self._sel_signals.discard(item.data(Qt.UserRole))
         self._refresh_sel_list()
+        # 移除信号后：实时曲线与采集 worker 同步停止该信号（Bug1 修复）
+        self._sync_monitor_signals()
 
     def _clear_selected(self):
         self._sel_signals.clear()
         self._refresh_sel_list()
+        # 清空后：曲线与采集同步清空（Bug1 修复）
+        self._sync_monitor_signals()
+
+    def _sync_monitor_signals(self):
+        """已选信号列表变化后，使实时曲线与采集 worker 与实际选择保持一致：
+
+        - 移除已不在选择中的信号：曲线删除、采集停止；
+        - 监控进行中新增的信号：加入采集与曲线。
+        """
+        sel = self._sel_signals
+        # 1) 曲线侧：移除不在选择中的信号（一次重绘，不影响其它曲线）
+        if self._plot._realtime:
+            self._plot.remove_realtime_signals(sel)
+        # 2) 采集 worker 侧：与选择同步（去/加）
+        if self._capture_worker is not None:
+            self._capture_worker.sync_signals(sel)
+            # 3) 监控进行中新增的信号：加入曲线（worker 侧已同步）
+            if self._monitoring:
+                for (m, s) in sel:
+                    if not self._plot.has_realtime_signal(m, s):
+                        self._plot.add_realtime_signal(self._frame_id_of(m), m, s)
 
     # ────────────────────── 开始 / 停止监控 ──────────────────────
 

@@ -118,19 +118,19 @@ class SignalGroupPanel(QWidget):
         self._sig_search.textChanged.connect(self._on_group_search)
         layout.addWidget(self._sig_search)
 
-        # ─── 全选 / 取消全选（紧贴搜索框下方，与信号检索视图一致的勾选框）───
+        # ─── 单一「全选」勾选框（紧贴搜索框下方，与信号检索视图一致）───
         sel_bar = QHBoxLayout()
         sel_bar.setSpacing(8)
         self._check_all_chk = QCheckBox("全选")
+        self._check_all_chk.setToolTip(
+            "勾选：选中当前可见（含跨分组搜索结果）的所有信号；\n"
+            "取消：取消全部可见信号；\n"
+            "存在未勾选信号时，本框自动取消勾选"
+        )
         self._check_all_chk.stateChanged.connect(
             lambda _s: self._on_check_all(self._check_all_chk.isChecked())
         )
-        self._uncheck_all_chk = QCheckBox("取消全选")
-        self._uncheck_all_chk.stateChanged.connect(
-            lambda _s: self._on_uncheck_all(self._uncheck_all_chk.isChecked())
-        )
         sel_bar.addWidget(self._check_all_chk)
-        sel_bar.addWidget(self._uncheck_all_chk)
         sel_bar.addStretch()
         layout.addLayout(sel_bar)
 
@@ -335,12 +335,11 @@ class SignalGroupPanel(QWidget):
                 header.setFont(0, hf)
                 for sig_ref in matches:
                     self._add_signal_item(header, sig_ref)
-            self._sig_list.expandAll()
+                self._sig_list.expandAll()
         else:
             if self._current_group_idx < 0:
                 self._sig_list.blockSignals(False)
-                self._check_all_chk.setChecked(False)
-                self._uncheck_all_chk.setChecked(False)
+                self._update_check_all_state()
                 return
             g = self._groups[self._current_group_idx]
             for sig_ref in g.signals:
@@ -348,8 +347,7 @@ class SignalGroupPanel(QWidget):
 
         self._sig_list.blockSignals(False)
         # 重新搜索 -> 勾选框归位（单次搜索仅保留当前勾选）
-        self._check_all_chk.setChecked(False)
-        self._uncheck_all_chk.setChecked(False)
+        self._update_check_all_state()
 
     def _match_sig(self, sig_ref: SignalRef, text: str) -> bool:
         """按信号名 / 报文名 / 帧 ID / 备注内容匹配（不区分大小写）。"""
@@ -393,8 +391,9 @@ class SignalGroupPanel(QWidget):
     # ────────────────────── 信号操作 ──────────────────────
 
     def _on_sig_checked(self, item, column):
-        """组内信号勾选变化：通知外部页面联动刷新"""
+        """组内信号勾选变化：通知外部页面联动刷新，并刷新全选框状态"""
         self.checked_changed.emit(self.get_checked_signals())
+        self._update_check_all_state()
 
     def _on_group_search(self, text: str):
         """跨分组搜索：按信号名 / 报文名 / 备注过滤（不改动底层数据）。
@@ -441,21 +440,27 @@ class SignalGroupPanel(QWidget):
                 )
 
     def _on_check_all(self, checked: bool):
-        """勾选「全选」：勾选当前所有可见信号。"""
-        if not checked:
-            return  # 取消动作交给「取消全选」勾选框负责
-        self._set_visible_checked(True)
-        self._uncheck_all_chk.blockSignals(True)
-        self._uncheck_all_chk.setChecked(False)
-        self._uncheck_all_chk.blockSignals(False)
+        """单一「全选」勾选框：勾选=勾选当前所有可见信号，取消=取消所有可见信号。"""
+        self._set_visible_checked(checked)
 
-    def _on_uncheck_all(self, checked: bool):
-        """勾选「取消全选」：取消当前所有可见信号的勾选。"""
-        if not checked:
-            return
-        self._set_visible_checked(False)
+    def _update_check_all_state(self):
+        """刷新「全选」勾选框：仅当所有可见信号项均被勾选时才勾选全选框。"""
+        total = 0
+        checked = 0
+        for i in range(self._sig_list.topLevelItemCount()):
+            top = self._sig_list.topLevelItem(i)
+            candidates = []
+            if top.flags() & Qt.ItemIsUserCheckable:
+                candidates.append(top)
+            for j in range(top.childCount()):
+                candidates.append(top.child(j))
+            for it in candidates:
+                if (it.flags() & Qt.ItemIsUserCheckable) and not it.isHidden():
+                    total += 1
+                    if it.checkState(0) == Qt.Checked:
+                        checked += 1
         self._check_all_chk.blockSignals(True)
-        self._check_all_chk.setChecked(False)
+        self._check_all_chk.setChecked(total > 0 and checked == total)
         self._check_all_chk.blockSignals(False)
 
     def _set_visible_checked(self, checked: bool):
