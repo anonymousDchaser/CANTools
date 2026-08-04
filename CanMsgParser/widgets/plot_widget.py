@@ -332,6 +332,40 @@ class PlotWidget(QWidget):
             self._rt_buffers[key]["v"].clear()
         self._redraw()
 
+    def remove_realtime_signals(self, selected: set):
+        """批量移除不在 selected（set of (msg_name, sig_name)）中的实时信号曲线。
+
+        用于「实时监控页」移除已选信号时，使曲线与已选列表保持一致（一次重绘，
+        不影响未被移除的信号曲线）。监控已停止但画面保留时同样可调用以清理曲线。
+        """
+        if not self._realtime:
+            return
+        removed = False
+        for key in list(self._rt_meta):
+            if (key[1], key[2]) not in selected:
+                self._rt_meta.remove(key)
+                self._rt_buffers.pop(key, None)
+                self._rt_lines.pop(key, None)
+                self._rt_axes.pop(key, None)
+                removed = True
+        if removed:
+            self._redraw()
+
+    def add_realtime_signal(self, frame_id, msg_name: str, sig_name: str):
+        """监控进行中新增一个信号：加入实时缓冲与曲线并重绘（去重）。"""
+        if not self._realtime:
+            return
+        key = (frame_id, msg_name, sig_name)
+        if key in self._rt_meta:
+            return
+        self._rt_meta.append(key)
+        self._rt_buffers[key] = {"t": [], "v": []}
+        self._redraw()
+
+    def has_realtime_signal(self, msg_name: str, sig_name: str) -> bool:
+        """当前实时模式是否已包含该信号曲线（按 (msg_name, sig_name) 匹配）。"""
+        return any(k[1] == msg_name and k[2] == sig_name for k in self._rt_meta)
+
     def set_subplot_mode(self, enabled: bool):
         """设置是否使用独立子图模式（Issue 3：实时监控页默认独立子图）。
 

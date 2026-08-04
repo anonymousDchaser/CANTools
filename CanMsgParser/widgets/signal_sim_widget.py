@@ -365,7 +365,12 @@ class SignalSimWidget(QWidget):
 
             row.setText(COL_FORMULA, self._formula_text(sdef) if sdef else "")
             row.setText(COL_DETAIL, "")
-            row.setText(COL_STATUS, "停止")
+            # 若该报文组已在发送中（如监控进行中加入同 ID 新信号），新行状态
+            # 应同步为「发送中」，而非错误的「停止」（Bug3 修复）
+            row.setText(COL_STATUS, "发送中" if grp["sending"] else "停止")
+            row.setForeground(
+                COL_STATUS, QColor("#44CC44" if grp["sending"] else "#888888")
+            )
 
             # 模拟值：枚举下拉（来自信号矩阵 choices）+ 「手动模拟」项。
             choices = self._choices_of(key)

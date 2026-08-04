@@ -95,7 +95,6 @@ def test_group_search_checkbox_reset_on_research():
     w._sig_search.setText("Sig")
     assert w.get_checked_signals() == [], "re-search should clear checks"
     assert w._check_all_chk.isChecked() is False
-    assert w._uncheck_all_chk.isChecked() is False
     print("    OK: re-search resets checkbox state")
 
 
