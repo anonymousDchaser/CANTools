@@ -812,7 +812,7 @@ class MainWindow(QMainWindow):
         """日志加载进度回调"""
         self._progress_bar.setValue(percent)
 
-    def _on_load_finished(self, frame_index, raw_data):
+    def _on_load_finished(self, frame_index, raw_data, byte_change=None):
         """日志加载完成回调"""
         self._frame_index = frame_index
         self._raw_data = raw_data
@@ -823,7 +823,7 @@ class MainWindow(QMainWindow):
         t_end = frame_index["timestamp"].iloc[-1] if num_frames > 0 else 0
 
         self._message_table.set_data(
-            frame_index, raw_data, self._messages, self._dbc_path
+            frame_index, raw_data, self._messages, self._dbc_path, byte_change
         )
 
         self._statusbar.showMessage(

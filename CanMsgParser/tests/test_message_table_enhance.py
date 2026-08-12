@@ -1,15 +1,19 @@
 # tests/test_message_table_enhance.py
 """报文表格页增强测试（offscreen，无 matplotlib 渲染）：
 双击展开报文 ID 后，信号子项新增『十六进制值』列与『信号描述』列。
+基于 MessageTableModel 接口断言（不再使用 QTreeWidget 内部 API）。
 """
 import sys
 import os
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import pandas as pd
 import cantools
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt
 
 from widgets.message_table import MessageTableWidget
 
@@ -64,7 +68,6 @@ def make_dbc():
     return path
 
 
-# 模块级 QApplication（PyQt5 要求，且必须在整个测试期间存活）
 _app = None
 
 
@@ -75,10 +78,19 @@ def get_app():
     return _app
 
 
+def _child_map(model, frame_idx):
+    idx = model.index(frame_idx, 0)
+    model.fetchMore(idx)
+    n = model.rowCount(idx)
+    return {
+        model.data(model.index(i, 1, idx), Qt.DisplayRole): i
+        for i in range(n)
+    }, idx
+
+
 def _make_widget_with_frame(dbc_path):
     get_app()
     w = MessageTableWidget()
-    # 一帧：TCU_Drivemode=1 (前进), Speed raw=100 -> 10.0 km/h
     frame_index = pd.DataFrame({
         "frame_id": np.array([0], dtype=np.int64),
         "timestamp": np.array([0.0], dtype=np.float64),
@@ -91,46 +103,46 @@ def _make_widget_with_frame(dbc_path):
     raw_data[0] = [1, 100, 0, 0, 0, 0, 0, 0]
     w.update_dbc(dbc_path)
     w.set_data(frame_index, raw_data, [], dbc_path)
-    return w, w._tree.topLevelItem(0)
+    return w
 
 
 def test_message_table_hex_and_desc():
     print("[A] 报文表格页：十六进制值 + 信号描述列 ...")
     get_app()
     dbc_path = make_dbc()
-    w, item = _make_widget_with_frame(dbc_path)
+    w = _make_widget_with_frame(dbc_path)
 
-    w._on_item_expanded(item)
-    assert item.childCount() > 0, "展开后应有信号子项"
+    cmap, idx = _child_map(w._model, 0)
+    assert "TCU_Drivemode" in cmap and "Speed" in cmap
 
-    children = {item.child(i).text(1): item.child(i) for i in range(item.childCount())}
-    assert "TCU_Drivemode" in children and "Speed" in children
-
-    dm = children["TCU_Drivemode"]
-    sp = children["Speed"]
+    dm = cmap["TCU_Drivemode"]
+    sp = cmap["Speed"]
     # 十六进制值列（左侧）
-    assert dm.text(2) == "0x1", f"TCU_Drivemode 十六进制列应为 '0x1', got={dm.text(2)!r}"
+    assert w._model.data(w._model.index(dm, 2, idx), Qt.DisplayRole) == "0x1", \
+        f"TCU_Drivemode 十六进制列应为 '0x1'"
     # 十进制值列（含枚举名）
-    assert dm.text(3) == "1 (前进)", \
-        f"TCU_Drivemode 十进制列应为 '1 (前进)', got={dm.text(3)!r}"
+    assert w._model.data(w._model.index(dm, 3, idx), Qt.DisplayRole) == "1 (前进)", \
+        f"TCU_Drivemode 十进制列应为 '1 (前进)'"
     # 信号描述列（DBC choices 优先）
-    assert dm.text(5) == "前进", f"TCU_Drivemode 描述列应为 '前进', got={dm.text(5)!r}"
-
+    assert w._model.data(w._model.index(dm, 5, idx), Qt.DisplayRole) == "前进", \
+        f"TCU_Drivemode 描述列应为 '前进'"
     # Speed：十六进制 + 十进制 + 无描述
-    assert sp.text(2) == "0x64", f"Speed 十六进制列应为 '0x64', got={sp.text(2)!r}"
-    assert sp.text(3) == "10.0", f"Speed 十进制列应为 '10.0', got={sp.text(3)!r}"
-    assert sp.text(5) == "", f"Speed 无描述应为空, got={sp.text(5)!r}"
+    assert w._model.data(w._model.index(sp, 2, idx), Qt.DisplayRole) == "0x64", \
+        f"Speed 十六进制列应为 '0x64'"
+    assert w._model.data(w._model.index(sp, 3, idx), Qt.DisplayRole) == "10.0", \
+        f"Speed 十进制列应为 '10.0'"
+    assert w._model.data(w._model.index(sp, 5, idx), Qt.DisplayRole) == "", \
+        f"Speed 无描述应为空"
     print("    OK: 十六进制/十进制/描述列均正确（DBC choices 优先）")
 
-    # Excel 兜底：清子项后用 Excel 描述重新展开
-    while item.childCount() > 0:
-        item.removeChild(item.child(0))
+    # Excel 兜底：清解码缓存后用 Excel 描述重新展开
+    w._model._decoded.clear()
+    w._model._decode_err.clear()
     w.set_value_descriptions({"TCU_Drivemode": {1: "Excel前进"}})
-    w._on_item_expanded(item)
-    children2 = {item.child(i).text(1): item.child(i) for i in range(item.childCount())}
-    dm2 = children2["TCU_Drivemode"]
-    assert dm2.text(5) == "Excel前进", \
-        f"Excel 兜底应显示 'Excel前进', got={dm2.text(5)!r}"
+    cmap2, idx2 = _child_map(w._model, 0)
+    dm2 = cmap2["TCU_Drivemode"]
+    assert w._model.data(w._model.index(dm2, 5, idx2), Qt.DisplayRole) == "Excel前进", \
+        f"Excel 兜底应显示 'Excel前进'"
     print("    OK: Excel 表描述兜底生效")
     print("[A] 通过\n")
 
