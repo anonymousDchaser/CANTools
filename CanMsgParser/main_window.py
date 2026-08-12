@@ -896,6 +896,7 @@ class MainWindow(QMainWindow):
         gen = self._curve_decode_gen
         self._decoded_signals.clear()
         self._statusbar.showMessage(f"正在解码 {len(signals)} 个信号...")
+        self._plot_widget.show_loading(f"正在解码 {len(signals)} 个信号…")
         for msg_name, sig_name in signals:
             worker = DecodeWorker(
                 self._dbc_path, msg_name, sig_name,
@@ -905,7 +906,8 @@ class MainWindow(QMainWindow):
                 lambda ds, g=gen: self._on_curve_decode_finished(ds, g)
             )
             worker.error.connect(
-                lambda e: QMessageBox.warning(self, "解码错误", e)
+                lambda e: (self._plot_widget.hide_loading(),
+                           QMessageBox.warning(self, "解码错误", e))
             )
             worker.start()
             self._decode_workers.append(worker)
@@ -917,6 +919,7 @@ class MainWindow(QMainWindow):
         self._decoded_signals.append(decoded_signal)
         if len(self._decoded_signals) >= len(self._curve_signals):
             self._plot_widget.plot_signals(self._decoded_signals)
+            self._plot_widget.hide_loading()
             self._tabs.setCurrentIndex(1)
             self._statusbar.showMessage(
                 f"绘图完成: {len(self._decoded_signals)} 个信号"

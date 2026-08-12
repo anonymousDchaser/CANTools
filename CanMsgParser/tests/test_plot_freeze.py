@@ -4,6 +4,9 @@
 导致 redraw 落入「请勾选信号」占位图分支，曲线被清掉。
 """
 import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt5.QtWidgets import QApplication
 

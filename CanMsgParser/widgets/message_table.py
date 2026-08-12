@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QComboBox, QLabel, QHeaderView,
     QStyledItemDelegate, QStyle,
 )
-from PyQt5.QtCore import Qt, QAbstractItemModel, QModelIndex, QSize
+from PyQt5.QtCore import Qt, QAbstractItemModel, QModelIndex, QSize, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
 import cantools
 from core.can_utils import load_dbc_database
@@ -31,18 +31,10 @@ from core.byte_change import compute_byte_change_array, NO_CHANGE
 class MessageTableModel(QAbstractItemModel):
     """报文表的虚拟树模型。
 
-    结构：根 -> N 个帧（顶层）；每个帧可懒展开出若干信号子项。
-    - 顶层帧行只在可视区被查询，内存占用仅为 (frame_index, raw_data, byte_change)
-      三块紧凑 numpy/DataFrame，与帧数成线性、无每行对象。
-    - 信号子项仅在用户展开某一行时解码并缓存（fetchMore），不预解码。
-
-    节点标识（全部为非负整数，规避 PyQt 把 negative int 存进 unsigned 64-bit
-    internalId 后 round-trip 成极大值的问题）：
-    - 顶层帧 r：internalId = (r << 1) | 1           （bit0 = 1）
-    - 信号子项 (r, s)：internalId = (r<<17) | (s<<1) （bit0 = 0；s 占 bit1..16）
-    - 0 表示无效（QModelIndex 默认）
-    节点完全由 internalId 整数还原（见 _node），不持有任何 Python 对象，
-    因此 C++ 侧取回节点时不会发生悬空指针 / 段错误，且字典常驻内存为 O(1)。
+    额外采用**根级懒窗口**（动态加载，对标 CANoe/TSMaster 的大日志策略）：
+    首绘只装载初始窗口（_WINDOW_INIT 行）而非全部 N 行，因此首绘复杂度从 O(N)
+    降为 O(窗口)，切到报文表格页 / 双击展开都不会因总行数巨大而卡顿；用户向下
+    滚动时 QTreeView 通过 canFetchMore/fetchMore 自动按块追加后续行。
     """
 
     _HEADERS = [
@@ -53,6 +45,13 @@ class MessageTableModel(QAbstractItemModel):
         "Channel / 单位",
         "Data(Hex) / 信号描述",
     ]
+
+    # 根级懒窗口参数（动态加载）
+    _WINDOW_INIT = 5000     # 首绘装载行数
+    _WINDOW_STEP = 5000     # 滚动到底后每次追加行数
+
+    # 已装载行数变化时通知（供状态栏显示「已加载 X / N 帧」）
+    loadedChanged = pyqtSignal(int, int)
 
     @staticmethod
     def _frame_id(r):
@@ -79,6 +78,13 @@ class MessageTableModel(QAbstractItemModel):
         self._decoded: dict = {}              # r -> [(sig_name, hex, dec, unit, desc), ...]
         self._decode_err: dict = {}           # r -> 错误信息字符串
         self._last_err = ""
+        self._total = 0                       # 当前数据集总行数（含未装载的）
+        self._loaded = 0                      # 已向视图暴露的行数（懒窗口上界）
+
+    # ───────── 懒窗口辅助 ─────────
+    def _reset_window(self):
+        self._total = len(self._frame_index) if self._frame_index is not None else 0
+        self._loaded = min(self._WINDOW_INIT, self._total)
 
     # ───────── 数据设置 ─────────
     def set_data(self, frame_index: pd.DataFrame, raw_data: np.ndarray, byte_change: np.ndarray):
@@ -89,7 +95,9 @@ class MessageTableModel(QAbstractItemModel):
         self._max_dlc = int(raw_data.shape[1]) if raw_data is not None and raw_data.ndim == 2 else 8
         self._decoded.clear()
         self._decode_err.clear()
+        self._reset_window()
         self.endResetModel()
+        self.loadedChanged.emit(self._loaded, self._total)
 
     def set_dbc(self, db):
         self._db = db
@@ -120,7 +128,8 @@ class MessageTableModel(QAbstractItemModel):
 
     def rowCount(self, parent=QModelIndex()):
         if not parent.isValid():
-            return len(self._frame_index) if self._frame_index is not None else 0
+            # 根级只返回「已装载窗口」行数，而非全部，避免 O(N) 首绘卡顿
+            return self._loaded
         node = self._node(parent)
         if node is None:
             return 0
@@ -156,7 +165,8 @@ class MessageTableModel(QAbstractItemModel):
 
     def hasChildren(self, parent=QModelIndex()):
         if not parent.isValid():
-            return self._frame_index is not None and len(self._frame_index) > 0
+            # 仅对已装载窗口内的行画展开箭头；视图只会遍历 _loaded 行，故为 O(窗口)
+            return self._frame_index is not None and self._loaded > 0
         node = self._node(parent)
         if node is None:
             return False
@@ -177,7 +187,8 @@ class MessageTableModel(QAbstractItemModel):
     # ───────── 懒加载解码子项 ─────────
     def canFetchMore(self, parent):
         if not parent.isValid():
-            return False
+            # 根级：还有未装载的行则继续懒加载
+            return self._loaded < self._total
         node = self._node(parent)
         if node is None or node[0] != "frame":
             return False
@@ -186,6 +197,17 @@ class MessageTableModel(QAbstractItemModel):
 
     def fetchMore(self, parent):
         if not parent.isValid():
+            # 根级懒窗口追加：按块装入后续行
+            if self._loaded >= self._total:
+                return
+            old = self._loaded
+            new = min(old + self._WINDOW_STEP, self._total)
+            if new <= old:
+                return
+            self.beginInsertRows(parent, old, new - 1)
+            self._loaded = new
+            self.endInsertRows()
+            self.loadedChanged.emit(self._loaded, self._total)
             return
         node = self._node(parent)
         if node is None or node[0] != "frame":
@@ -606,8 +628,14 @@ class MessageTableWidget(QWidget):
         self._reset_btn.clicked.connect(self._reset_filter)
         filter_layout.addWidget(self._reset_btn)
 
+        self._load_label = QLabel("")
+        self._load_label.setStyleSheet("color:#9090a0; font-size:12px;")
+        filter_layout.addWidget(self._load_label)
+
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
+
+        self._model.loadedChanged.connect(self._on_loaded_changed)
 
         # ─── 虚拟树形表格 ───
         self._tree = QTreeView()
@@ -630,6 +658,14 @@ class MessageTableWidget(QWidget):
         layout.addWidget(self._tree, stretch=1)
 
     # ────────────────────── 公共接口 ──────────────────────
+
+    def _on_loaded_changed(self, loaded: int, total: int):
+        if total > 0 and loaded < total:
+            self._load_label.setText(f"已加载 {loaded} / {total} 帧（滚动到底自动加载更多）")
+        elif total > 0:
+            self._load_label.setText(f"共 {total} 帧")
+        else:
+            self._load_label.setText("")
 
     def set_data(self, frame_index: pd.DataFrame, raw_data: np.ndarray,
                  messages: list[MessageDef], dbc_path: str = "",

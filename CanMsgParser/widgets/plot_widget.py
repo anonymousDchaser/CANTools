@@ -15,7 +15,7 @@ import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QApplication
 from PyQt5.QtCore import Qt
 from core.can_data import DecodedSignal
 from utils.lttb import lttb_downsample
@@ -177,6 +177,16 @@ class PlotWidget(QWidget):
         self._fig.patch.set_facecolor("#1e1e2e")
         self._canvas = FigureCanvas(self._fig)
         self._canvas.setStyleSheet("background-color: #1e1e2e; border: 1px solid #3a3a4e; border-radius: 4px;")
+
+        # 绘制中半透明加载层（覆盖在画布上，解码/绘图期间提示，避免误以为卡死）
+        self._overlay = QLabel(self._canvas)
+        self._overlay.setAlignment(Qt.AlignCenter)
+        self._overlay.setStyleSheet(
+            "background-color: rgba(30,30,46,210); color:#4fc3f7; "
+            "font-size:15px; font-weight:bold;"
+        )
+        self._overlay.hide()
+
         self._toolbar = NavigationToolbar(self._canvas, self)
         self._toolbar.setStyleSheet("background-color: #1e1e2e; border: none;")
 
@@ -201,6 +211,28 @@ class PlotWidget(QWidget):
     def get_figure(self) -> Figure:
         """返回 matplotlib Figure 对象，用于导出"""
         return self._fig
+
+    # ────────────────────── 绘制中加载层 ──────────────────────
+    def show_loading(self, text: str = "正在绘制曲线…"):
+        """显示半透明「绘制中」覆盖层（先 processEvents 让层立即渲染出来）。"""
+        self._overlay.setText(text)
+        self._position_overlay()
+        self._overlay.raise_()
+        self._overlay.show()
+        QApplication.processEvents()
+
+    def hide_loading(self):
+        """隐藏「绘制中」覆盖层。"""
+        self._overlay.hide()
+        QApplication.processEvents()
+
+    def _position_overlay(self):
+        self._overlay.setGeometry(0, 0, self._canvas.width(), self._canvas.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._overlay.isVisible():
+            self._position_overlay()
 
     def set_value_descriptions(self, descriptions: dict):
         """设置 DBC 值描述表，用于悬停提示显示枚举含义
