@@ -1,162 +1,424 @@
 # widgets/message_table.py
-"""原始报文查看器：可展开的树形表格，支持过滤和按需解码
+"""原始报文查看器：可展开树形表格，支持过滤和按需解码（虚拟化重写）
 
-功能特性：
-- 可展开行：点击帧行展开显示解码后的信号值
-- 多条件过滤：报文ID、信号名模糊搜索、时间范围
-- 大数据集优化：限制最大显示行数，批量填充
-- DBC 解码集成：使用 cantools 实时解码
-- 专业深色主题样式
+性能设计（对标 CANoe / TSMaster 的大日志策略）：
+- 用 QTreeView + QAbstractItemModel 替代 QTreeWidget：帧行**虚拟化**，只有可视区
+  的行才会 materialize（data() 按需调用），因此彻底去掉了原先的 10000 行硬上限，
+  加载百万级帧也不再为每个行创建 Python 对象，内存可控、UI 不卡。
+- 字节变化高亮改用 core.byte_change 的**向量化数组**，由加载线程预计算，
+  不再在主线程构建 GB 级嵌套字典（旧实现卡死的根因之二）。
+- 解码子项（展开后的信号）**按需懒加载**：canFetchMore/fetchMore 触发，
+  只解码用户实际展开的那一行，不预解码全部。
+
+节点标识采用 internalId(整数) + 节点字典的方案（而非 Python 对象作为
+internalPointer），避免 C++ 侧持有已回收的 Python 对象导致段错误。
 """
 import numpy as np
 import pandas as pd
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
+    QWidget, QVBoxLayout, QHBoxLayout, QTreeView,
     QLineEdit, QPushButton, QComboBox, QLabel, QHeaderView,
     QStyledItemDelegate, QStyle,
 )
-from PyQt5.QtCore import Qt, QRect, QSize
+from PyQt5.QtCore import Qt, QAbstractItemModel, QModelIndex, QSize
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
 import cantools
 from core.can_utils import load_dbc_database
 from core.can_data import MessageDef
+from core.byte_change import compute_byte_change_array, NO_CHANGE
+
+
+class MessageTableModel(QAbstractItemModel):
+    """报文表的虚拟树模型。
+
+    结构：根 -> N 个帧（顶层）；每个帧可懒展开出若干信号子项。
+    - 顶层帧行只在可视区被查询，内存占用仅为 (frame_index, raw_data, byte_change)
+      三块紧凑 numpy/DataFrame，与帧数成线性、无每行对象。
+    - 信号子项仅在用户展开某一行时解码并缓存（fetchMore），不预解码。
+
+    节点标识（全部为非负整数，规避 PyQt 把 negative int 存进 unsigned 64-bit
+    internalId 后 round-trip 成极大值的问题）：
+    - 顶层帧 r：internalId = (r << 1) | 1           （bit0 = 1）
+    - 信号子项 (r, s)：internalId = (r<<17) | (s<<1) （bit0 = 0；s 占 bit1..16）
+    - 0 表示无效（QModelIndex 默认）
+    节点完全由 internalId 整数还原（见 _node），不持有任何 Python 对象，
+    因此 C++ 侧取回节点时不会发生悬空指针 / 段错误，且字典常驻内存为 O(1)。
+    """
+
+    _HEADERS = [
+        "序号",
+        "时间(s) / 信号名",
+        "ID / 十六进制值",
+        "DLC / 十进制值",
+        "Channel / 单位",
+        "Data(Hex) / 信号描述",
+    ]
+
+    @staticmethod
+    def _frame_id(r):
+        # bit0 = 1 标记顶层帧；r 存于高位。id 恒为正——
+        # internalId 是无符号 64 位，绝不能传负数，否则 round-trip 后会变成极大值
+        # 导致节点被误判成别的类型（这是之前 canFetchMore 失效的隐藏原因）。
+        return (r << 1) | 1
+
+    @staticmethod
+    def _child_id(r, s):
+        # bit0 = 0 标记信号子项；s 占 bit1..16，r 占 bit17+。
+        # 整体 +2 保证 id 永不为 0（internalId==0 是 QModelIndex 无效哨兵，
+        # r=s=0 时必须规避，否则首个帧的首个信号子项会被误判为无效）。
+        return (((r & 0x7FFFFFFFFFFF) << 17) | ((s & 0xFFFF) << 1)) + 2
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frame_index: pd.DataFrame | None = None
+        self._raw_data: np.ndarray | None = None
+        self._byte_change: np.ndarray | None = None
+        self._max_dlc = 8
+        self._db = None
+        self._value_descriptions: dict = {}
+        self._decoded: dict = {}              # r -> [(sig_name, hex, dec, unit, desc), ...]
+        self._decode_err: dict = {}           # r -> 错误信息字符串
+        self._last_err = ""
+
+    # ───────── 数据设置 ─────────
+    def set_data(self, frame_index: pd.DataFrame, raw_data: np.ndarray, byte_change: np.ndarray):
+        self.beginResetModel()
+        self._frame_index = frame_index
+        self._raw_data = raw_data
+        self._byte_change = byte_change
+        self._max_dlc = int(raw_data.shape[1]) if raw_data is not None and raw_data.ndim == 2 else 8
+        self._decoded.clear()
+        self._decode_err.clear()
+        self.endResetModel()
+
+    def set_dbc(self, db):
+        self._db = db
+        self._decoded.clear()
+        self._decode_err.clear()
+
+    def _node(self, index):
+        """从 internalId 直接还原节点，不依赖任何 Python 对象（避免段错误）。
+
+        internalId 编码（均为非负整数，规避无符号 round-trip 陷阱）：
+          bit0 == 1 : 顶层帧 r            -> ("frame", internalId >> 1)
+          bit0 == 0 : 信号子项 (r, s)     -> v = internalId - 2; r = v >> 17, s = (v >> 1) & 0xFFFF
+          0         : 无效 (QModelIndex 默认)
+        """
+        iid = index.internalId()
+        if iid == 0:
+            return None
+        if iid & 1:
+            return ("frame", iid >> 1)
+        v = iid - 2
+        r = v >> 17
+        s = (v >> 1) & 0xFFFF
+        return ("sig", r, s)
+
+    # ───────── 模型基本接口 ─────────
+    def columnCount(self, parent=QModelIndex()):
+        return 6
+
+    def rowCount(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return len(self._frame_index) if self._frame_index is not None else 0
+        node = self._node(parent)
+        if node is None:
+            return 0
+        if node[0] == "frame":
+            r = node[1]
+            if r in self._decoded:
+                return len(self._decoded[r])
+            if r in self._decode_err:
+                return 1
+            return 0
+        return 0
+
+    def index(self, row, column, parent=QModelIndex()):
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        if not parent.isValid():
+            return self.createIndex(row, column, self._frame_id(row))
+        node = self._node(parent)
+        if node is not None and node[0] == "frame":
+            r = node[1]
+            cid = self._child_id(r, row)
+            return self.createIndex(row, column, cid)
+        return QModelIndex()
+
+    def parent(self, index):
+        if not index.isValid():
+            return QModelIndex()
+        node = self._node(index)
+        if node is None or node[0] == "frame":
+            return QModelIndex()
+        r = node[1]
+        return self.createIndex(r, 0, self._frame_id(r))
+
+    def hasChildren(self, parent=QModelIndex()):
+        if not parent.isValid():
+            return self._frame_index is not None and len(self._frame_index) > 0
+        node = self._node(parent)
+        if node is None:
+            return False
+        if node[0] == "frame":
+            return True
+        return False
+
+    def headerData(self, section, orientation, role):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self._HEADERS[section]
+        return None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+
+    # ───────── 懒加载解码子项 ─────────
+    def canFetchMore(self, parent):
+        if not parent.isValid():
+            return False
+        node = self._node(parent)
+        if node is None or node[0] != "frame":
+            return False
+        r = node[1]
+        return (r not in self._decoded) and (r not in self._decode_err)
+
+    def fetchMore(self, parent):
+        if not parent.isValid():
+            return
+        node = self._node(parent)
+        if node is None or node[0] != "frame":
+            return
+        r = node[1]
+        if r in self._decoded or r in self._decode_err:
+            return
+        children = self._decode_frame(r)
+        if children is None:
+            self._decode_err[r] = self._last_err or "(解码失败)"
+            self.beginInsertRows(parent, 0, 0)
+            self.endInsertRows()
+        else:
+            self.beginInsertRows(parent, 0, len(children) - 1)
+            self._decoded[r] = children
+            self.endInsertRows()
+
+    def frame_meta(self, r):
+        """返回第 r 帧的 (frame_id, dlc)，供委托绘制高亮使用。"""
+        row = self._frame_index.iloc[r]
+        return int(row["frame_id"]), int(row["dlc"])
+
+    # ───────── 数据显示 ─────────
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        node = self._node(index)
+        if node is None:
+            return None
+        col = index.column()
+        if node[0] == "frame":
+            if role != Qt.DisplayRole:
+                return None
+            r = node[1]
+            row = self._frame_index.iloc[r]
+            if col == 0:
+                return str(int(row["frame_id"]))
+            if col == 1:
+                return f"{float(row['timestamp']):.6f}"
+            if col == 2:
+                return f"0x{int(row['arbitration_id']):03X}"
+            if col == 3:
+                return str(int(row["dlc"]))
+            if col == 4:
+                return str(int(row["channel"]))
+            if col == 5:
+                fid = int(row["frame_id"])
+                dlc = int(row["dlc"])
+                return " ".join(f"{b:02X}" for b in self._raw_data[fid, :dlc])
+            return None
+        else:
+            if role != Qt.DisplayRole:
+                return None
+            r, s = node[1], node[2]
+            return self._child_text(r, s, col)
+
+    def _child_text(self, r, s, col):
+        if r in self._decode_err:
+            return self._decode_err[r] if col == 1 else ""
+        child = self._decoded[r][s]
+        if col == 0:
+            return ""
+        return child[col - 1]
+
+    # ───────── 解码 ─────────
+    def _decode_frame(self, r):
+        """解码第 r 帧的信号，返回子项元组列表；失败返回 None 并写入 _last_err。"""
+        if self._frame_index is None or self._raw_data is None:
+            self._last_err = "(无数据)"
+            return None
+        row = self._frame_index.iloc[r]
+        fid = int(row["frame_id"])
+        dlc = int(row["dlc"])
+        arb_id = int(row["arbitration_id"])
+        frame_data = bytes(self._raw_data[fid, :dlc])
+
+        db = self._db
+        if db is None:
+            self._last_err = "(未加载 DBC 数据库，请先加载 DBC 文件)"
+            return None
+        try:
+            msg_def = db.get_message_by_frame_id(arb_id)
+            if msg_def is None:
+                self._last_err = f"(未找到 ID=0x{arb_id:X} 的报文定义)"
+                return None
+            decoded = msg_def.decode(frame_data)
+            raw_decoded = self._decode_raw(db, arb_id, frame_data)
+            children = []
+            for sig_name, sig_value in decoded.items():
+                sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
+                unit = sig_def.unit if sig_def and sig_def.unit else ""
+                raw_val = raw_decoded.get(sig_name)
+                children.append((
+                    sig_name,
+                    self._raw_to_hex(raw_val),
+                    self._val_to_text(sig_value),
+                    unit,
+                    self._desc_of(arb_id, sig_name, raw_val),
+                ))
+            return children
+        except Exception as e:
+            self._last_err = f"(解码失败: {e})"
+            return None
+
+    @staticmethod
+    def _val_to_text(val) -> str:
+        if val is None:
+            return ""
+        if hasattr(val, "name") and hasattr(val, "value"):
+            return f"{val.value} ({val.name})"
+        return str(val)
+
+    @staticmethod
+    def _raw_to_hex(val) -> str:
+        if val is None:
+            return ""
+        try:
+            return f"0x{int(val):X}"
+        except (ValueError, TypeError):
+            return ""
+
+    def _decode_raw(self, db, arb_id: int, data: bytes) -> dict:
+        try:
+            msg = db.get_message_by_frame_id(arb_id)
+            decoded = msg.decode(data, decode_choices=False, scaling=False)
+            return dict(decoded)
+        except Exception:
+            return {}
+
+    def _desc_of(self, arb_id: int, sig_name: str, raw_val) -> str:
+        if raw_val is None:
+            return ""
+        try:
+            key = int(raw_val)
+        except (ValueError, TypeError):
+            return ""
+        desc = self._value_descriptions.get(sig_name, {}).get(key)
+        if desc:
+            return str(desc)
+        if self._db is not None:
+            try:
+                msg = self._db.get_message_by_frame_id(arb_id)
+                for s in msg.signals:
+                    if s.name == sig_name and s.choices:
+                        choice = s.choices.get(key)
+                        if choice is not None:
+                            return str(choice)
+            except Exception:
+                pass
+        return ""
 
 
 class HexDataDelegate(QStyledItemDelegate):
     """自定义委托：渲染 Data 列，对变化的字节高亮并渐变消退。
 
-    当同一 arbitration_id 的报文中某个字节值发生变化时，该字节以亮红色高亮显示，
-    并在后续约 FADE_FRAMES 帧内线性渐变回正常颜色。前 BOLD_FRAMES 帧内同时加粗显示。
+    高亮信息直接取自 MessageTableModel 的 byte_change 数组（按帧的 internalId 取行），
+    不再持有 GB 级字典。
     """
 
-    # 渐变参数（基于筛选后的帧数计数）
-    FADE_FRAMES = 500   # 筛选后500帧完全消退至正常色（0帧=高亮，500帧=正常，中点线性插值）
-    BOLD_FRAMES = 30    # 前30帧加粗显示
-    HIGHLIGHT_COLOR = QColor("#FF6B6B")   # 刚变化时的高亮色（亮红）
-    NORMAL_COLOR = QColor("#e0e0e0")       # 正常颜色
-    BG_COLOR = QColor("#1e1e2e")           # 单元格背景色（与设计系统一致）
-    SELECTED_BG = QColor("#1e3a5a")        # 选中行背景色
-
-    def __init__(self, parent=None, byte_change_info=None, parent_widget=None):
-        super().__init__(parent)
-        self._byte_change_info = byte_change_info or {}
-        self._parent_widget = parent_widget  # MessageTableWidget 引用
-
-    def update_change_info(self, byte_change_info):
-        """更新字节变化信息（过滤或数据变更时调用）"""
-        self._byte_change_info = byte_change_info
+    FADE_FRAMES = 500
+    BOLD_FRAMES = 30
+    HIGHLIGHT_COLOR = QColor("#FF6B6B")
+    NORMAL_COLOR = QColor("#e0e0e0")
+    BG_COLOR = QColor("#1e1e2e")
 
     def _get_byte_color(self, frames_since_change):
-        """根据距变化的帧数计算颜色。
-
-        0帧 = 最亮高亮色, FADE_FRAMES帧 = 正常色, 中间线性插值。
-        """
         if frames_since_change >= self.FADE_FRAMES:
             return self.NORMAL_COLOR
-
-        # 插值比例: 0=刚变化(全高亮), 1=完全消退(正常色)
         ratio = frames_since_change / self.FADE_FRAMES
-
         r = int(self.HIGHLIGHT_COLOR.red() +
                 (self.NORMAL_COLOR.red() - self.HIGHLIGHT_COLOR.red()) * ratio)
         g = int(self.HIGHLIGHT_COLOR.green() +
                 (self.NORMAL_COLOR.green() - self.HIGHLIGHT_COLOR.green()) * ratio)
         b = int(self.HIGHLIGHT_COLOR.blue() +
                 (self.NORMAL_COLOR.blue() - self.HIGHLIGHT_COLOR.blue()) * ratio)
-
         return QColor(r, g, b)
 
     def _is_bold(self, frames_since_change):
-        """判断是否需要加粗显示（刚变化的前 BOLD_FRAMES 帧）"""
         return frames_since_change < self.BOLD_FRAMES
 
     def paint(self, painter, option, index):
-        """绘制 Data 列单元格，逐字节着色。"""
-        # 子项（解码后的信号行）使用默认文本绘制，不走 hex 委托逻辑。
-        # 原因：topLevelItem(row) 对子行返回的是错误的顶层项，会导致子行
-        # 显示成另一帧的 hex 数据。
-        if index.parent().isValid():
+        model = index.model()
+        if not isinstance(model, MessageTableModel):
+            super().paint(painter, option, index)
+            return
+        node = model._node(index)
+        if node is None or node[0] != "frame" or index.column() != 5:
             super().paint(painter, option, index)
             return
 
-        if self._parent_widget is None:
+        bc = model._byte_change
+        raw = model._raw_data
+        if bc is None or raw is None:
             super().paint(painter, option, index)
             return
 
-        row = index.row()
-        tree = self._parent_widget._tree
-        item = tree.topLevelItem(row)
-        if item is None:
-            super().paint(painter, option, index)
-            return
+        r = node[1]
+        fid, dlc = model.frame_meta(r)
+        change_row = bc[r]
+        frame_data = raw[fid, :dlc]
 
-        # 从 UserRole 获取 iloc_pos，再从 _filtered_index 取 frame_id
-        iloc_pos = item.data(0, Qt.UserRole)
-        if iloc_pos is None:
-            super().paint(painter, option, index)
-            return
-
-        try:
-            fid = int(self._parent_widget._filtered_index.iloc[iloc_pos]["frame_id"])
-        except (IndexError, KeyError):
-            super().paint(painter, option, index)
-            return
-
-        if fid not in self._byte_change_info:
-            super().paint(painter, option, index)
-            return
-
-        # 获取原始数据和 DLC
-        try:
-            dlc = int(self._parent_widget._filtered_index.iloc[iloc_pos]["dlc"])
-        except (IndexError, KeyError):
-            super().paint(painter, option, index)
-            return
-
-        frame_data = self._parent_widget._raw_data[fid, :dlc]
-        change_info = self._byte_change_info[fid]
-
-        # 绘制背景（选中态 / 普通态）
         if option.state & QStyle.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
         else:
             painter.fillRect(option.rect, self.BG_COLOR)
 
-        # 使用等宽字体绘制每个字节
         font = QFont("Consolas", 9)
         fm = QFontMetrics(font)
         painter.setFont(font)
 
-        # 垂直居中计算 y 坐标
         char_x = option.rect.x() + 4
         char_y = (option.rect.y() +
                   (option.rect.height() - fm.height()) // 2 +
                   fm.ascent())
 
-        # 逐字节绘制：2个十六进制字符 + 1个空格
         for byte_idx, byte_val in enumerate(frame_data):
-            frames_since = change_info.get(byte_idx, 999)
+            frames_since = int(change_row[byte_idx])
             color = self._get_byte_color(frames_since)
             bold = self._is_bold(frames_since)
-
             font.setBold(bold)
             painter.setFont(font)
-
             hex_str = f"{byte_val:02X}"
             painter.setPen(color)
             painter.drawText(char_x, char_y, hex_str)
-            # "00 " 三个字符宽度（含尾部空格）
             char_x += fm.horizontalAdvance("00 ")
 
     def sizeHint(self, option, index):
-        """返回 Data 列的建议尺寸"""
         return QSize(300, 24)
 
 
 class MessageTableWidget(QWidget):
     """报文表格组件，带过滤和按需解码功能"""
 
-    # ─── QSS 样式表（与设计系统一致） ───
     _QSS = """
         QWidget {
             background-color: #1e1e2e;
@@ -223,7 +485,7 @@ class MessageTableWidget(QWidget):
         QPushButton:pressed {
             background-color: #2a2a3e;
         }
-        QTreeWidget {
+        QTreeView {
             background-color: #1e1e2e;
             alternate-background-color: #252535;
             color: #e0e0e0;
@@ -234,26 +496,24 @@ class MessageTableWidget(QWidget):
             font-family: "Consolas", "Cascadia Code", monospace;
             font-size: 12px;
         }
-        QTreeWidget::item {
+        QTreeView::item {
             padding: 4px 6px;
         }
-        QTreeWidget::item:selected {
+        QTreeView::item:selected {
             background-color: #1e3a5a;
             color: #4fc3f7;
         }
-        QTreeWidget::item:hover {
+        QTreeView::item:hover {
             background-color: #2a2a4e;
         }
-        QTreeWidget::branch {
+        QTreeView::branch {
             background-color: #1e1e2e;
         }
-        QTreeWidget::branch:has-children:!has-siblings:closed,
-        QTreeWidget::branch:closed:has-children:has-siblings {
+        QTreeView::branch:closed:has-children {
             image: none;
             border-image: none;
         }
-        QTreeWidget::branch:open:has-children:!has-siblings,
-        QTreeWidget::branch:open:has-children:has-siblings {
+        QTreeView::branch:open:has-children {
             image: none;
             border-image: none;
         }
@@ -278,12 +538,11 @@ class MessageTableWidget(QWidget):
         self._raw_data: np.ndarray | None = None
         self._messages: list[MessageDef] = []
         self._dbc_path: str = ""
-        self._db = None  # cantools Database
+        self._db = None
         self._filtered_index: pd.DataFrame | None = None
-        self._byte_change_info: dict = {}  # {frame_id: {byte_idx: frames_since_change}}
-        # {sig_name: {int_val: "描述"}}，来自 DBC+Excel 合并（主窗口派发）
         self._value_descriptions: dict = {}
 
+        self._model = MessageTableModel()
         self.setStyleSheet(self._QSS)
         self._setup_ui()
 
@@ -332,13 +591,11 @@ class MessageTableWidget(QWidget):
         self._time_end.setFixedWidth(90)
         filter_layout.addWidget(self._time_end)
 
-        # 主要操作按钮：应用过滤
         self._apply_btn = QPushButton("🔍 应用过滤")
         self._apply_btn.setProperty("class", "primary")
         self._apply_btn.clicked.connect(self._apply_filter)
         filter_layout.addWidget(self._apply_btn)
 
-        # 回车键触发过滤
         self._id_filter.lineEdit().returnPressed.connect(self._apply_filter)
         self._sig_filter.returnPressed.connect(self._apply_filter)
         self._time_start.returnPressed.connect(self._apply_filter)
@@ -352,47 +609,32 @@ class MessageTableWidget(QWidget):
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
 
-        # ─── 树形表格 ───
-        self._tree = QTreeWidget()
-        # 表头为父子分层语义：顶层=帧信息，子项（展开的信号）= 信号详情。
-        # 十六进制值在十进制值左侧（满足「左侧增加显示16进制」的诉求）。
-        self._tree.setHeaderLabels([
-            "序号",
-            "时间(s) / 信号名",
-            "ID / 十六进制值",
-            "DLC / 十进制值",
-            "Channel / 单位",
-            "Data(Hex) / 信号描述",
-        ])
-        self._tree.setColumnCount(6)
+        # ─── 虚拟树形表格 ───
+        self._tree = QTreeView()
         self._tree.setAlternatingRowColors(True)
         self._tree.setRootIsDecorated(True)
         self._tree.setUniformRowHeights(True)
         self._tree.setSortingEnabled(False)
-
-        # 列宽设置
         header = self._tree.header()
         header.setStretchLastSection(True)
         header.resizeSection(0, 70)
-        header.resizeSection(1, 200)  # 时间列 — 加宽以显示完整时间戳
-        header.resizeSection(2, 110)  # 十六进制值（子项）
-        header.resizeSection(3, 110)  # 十进制值（子项）
-        header.resizeSection(4, 80)   # 单位（子项）
+        header.resizeSection(1, 200)
+        header.resizeSection(2, 110)
+        header.resizeSection(3, 110)
+        header.resizeSection(4, 80)
 
-        # 在填充数据前连接展开信号，确保展开时能触发解码
-        self._tree.itemExpanded.connect(self._on_item_expanded)
-
-        # 创建自定义委托，用于 Data 列（第5列）的逐字节高亮渲染
-        self._hex_delegate = HexDataDelegate(parent=self._tree, parent_widget=self)
+        self._hex_delegate = HexDataDelegate(parent=self._tree)
         self._tree.setItemDelegateForColumn(5, self._hex_delegate)
+        self._tree.setModel(self._model)
 
         layout.addWidget(self._tree, stretch=1)
 
     # ────────────────────── 公共接口 ──────────────────────
 
     def set_data(self, frame_index: pd.DataFrame, raw_data: np.ndarray,
-                 messages: list[MessageDef], dbc_path: str = ""):
-        """设置数据源"""
+                 messages: list[MessageDef], dbc_path: str = "",
+                 byte_change: np.ndarray | None = None):
+        """设置数据源（支持百万级帧，已移除 10000 行上限）。"""
         self._frame_index = frame_index
         self._raw_data = raw_data
         self._messages = messages
@@ -404,15 +646,22 @@ class MessageTableWidget(QWidget):
                 self._db = load_dbc_database(dbc_path)
             except Exception:
                 self._db = None
+        else:
+            self._db = None
 
-        # 更新 ID 过滤下拉框
+        if byte_change is None:
+            max_dlc = int(raw_data.shape[1]) if raw_data is not None and raw_data.ndim == 2 else 8
+            byte_change = compute_byte_change_array(frame_index, raw_data, max_dlc)
+
+        self._model.set_dbc(self._db)
+        self._model._value_descriptions = self._value_descriptions
+        self._model.set_data(self._filtered_index, self._raw_data, byte_change)
+
         self._id_filter.clear()
         unique_ids = sorted(frame_index["arbitration_id"].unique())
         self._id_filter.addItem("全部")
         for aid in unique_ids:
             self._id_filter.addItem(f"0x{aid:03X}", aid)
-
-        self._populate_table()
 
     def get_filtered_index(self) -> pd.DataFrame | None:
         """返回当前过滤后的帧索引"""
@@ -421,307 +670,41 @@ class MessageTableWidget(QWidget):
     def update_dbc(self, dbc_path: str):
         """外部更新 DBC 数据库路径（例如主窗口加载 DBC 后通知）
 
-        当 DBC 在日志加载之后才加载时，需要通过此方法更新数据库，
-        否则展开行时 _db 仍为 None，无法解码信号。
-
-        同时清除所有已展开行的子项，以便用户再次展开时能使用新数据库重新解码。
-        如果不清除，之前因缺少 DBC 而显示错误信息的行将永远无法刷新。
-
-        清除子项后重新添加占位符，确保项目在 UI 上仍然显示展开箭头。
+        DBC 变化后旧解码结果失效：折叠全部并重置模型，强制下次展开时重新解码。
         """
         self._dbc_path = dbc_path
-        if dbc_path:
-            try:
-                self._db = load_dbc_database(dbc_path)
-            except Exception:
-                self._db = None
-
-        # 清除所有顶层项的子项，强制下次展开时重新解码
-        # 然后重新添加占位符以保持展开箭头可见
-        for i in range(self._tree.topLevelItemCount()):
-            item = self._tree.topLevelItem(i)
-            while item.childCount() > 0:
-                item.removeChild(item.child(0))
-            # 重新添加占位子项，使项目保持可展开状态
-            placeholder = QTreeWidgetItem(item)
-            placeholder.setText(1, "(点击展开解码)")
-            placeholder.setForeground(1, QColor("#777777"))
-
-    # ────────────────────── 字节变化检测 ──────────────────────
-
-    def _compute_byte_change_info(self):
-        """预计算每个字节的变化信息。
-
-        为当前过滤结果中每个帧的每个字节位置计算"距上次变化的帧数"。
-        按 arbitration_id 分组，仅在同一 ID 的连续帧之间比较。
-        首帧的所有字节标记为"无变化"（值为 999，>= FADE_FRAMES，渲染为正常色），
-        仅当字节值真正发生变化时才高亮（值为 0），之后帧数递增直至消退。
-        结果存入 self._byte_change_info: {frame_id: {byte_idx: frames_since_change}}
-        """
-        if self._filtered_index is None or self._raw_data is None:
-            self._byte_change_info = {}
-            return
-
-        self._byte_change_info = {}
-
-        # 跟踪每个 ID 每个字节的上次值和上次变化时的遍历序号
-        last_values = {}      # {arb_id: {byte_idx: last_byte_value}}
-        last_change_seq = {}  # {arb_id: {byte_idx: seq_when_changed or None}}
-
-        NO_CHANGE = 999  # 大于 FADE_FRAMES，渲染为正常色
-
-        for seq, (_, row) in enumerate(self._filtered_index.iterrows()):
-            fid = int(row["frame_id"])
-            arb_id = int(row["arbitration_id"])
-            dlc = int(row["dlc"])
-            frame_data = self._raw_data[fid, :dlc]
-
-            self._byte_change_info[fid] = {}
-
-            if arb_id not in last_values:
-                # 首帧 — 标记为"无变化"（正常色，不高亮）
-                last_values[arb_id] = {}
-                last_change_seq[arb_id] = {}
-                for byte_idx in range(dlc):
-                    last_values[arb_id][byte_idx] = frame_data[byte_idx]
-                    last_change_seq[arb_id][byte_idx] = None  # 从未变化
-                    self._byte_change_info[fid][byte_idx] = NO_CHANGE  # 无变化
-            else:
-                for byte_idx in range(dlc):
-                    current_byte = frame_data[byte_idx]
-                    prev_byte = last_values[arb_id].get(byte_idx)
-
-                    if prev_byte != current_byte:
-                        # 字节值发生变化
-                        last_values[arb_id][byte_idx] = current_byte
-                        last_change_seq[arb_id][byte_idx] = seq
-                        self._byte_change_info[fid][byte_idx] = 0  # 刚变化
-                    else:
-                        # 未变化
-                        change_seq = last_change_seq[arb_id].get(byte_idx)
-                        if change_seq is None:
-                            # 从未变化过
-                            self._byte_change_info[fid][byte_idx] = NO_CHANGE
-                        else:
-                            # 距上次变化的帧数
-                            self._byte_change_info[fid][byte_idx] = seq - change_seq
-
-    # ────────────────────── 表格填充 ──────────────────────
-
-    def _populate_table(self):
-        """填充表格（只显示帧头，不预解码信号）
-
-        关键：为每个顶层项目添加一个占位子项，使其在 UI 上显示展开箭头。
-        没有子项的 QTreeWidgetItem 不会显示展开指示器，用户无法点击展开。
-        占位子项在 _on_item_expanded 中被移除并替换为真实解码结果。
-        """
-        self._tree.clear()
-        if self._filtered_index is None:
-            return
-
-        # 限制显示行数，大数据集时分批加载
-        max_display = 10000
-        display_df = self._filtered_index.head(max_display)
-
-        self._tree.setUpdatesEnabled(False)
-        for iloc_pos, (idx, row) in enumerate(display_df.iterrows()):
-            fid = int(row["frame_id"])
-            dlc = int(row["dlc"])
-            hex_data = " ".join(f"{b:02X}" for b in self._raw_data[fid, :dlc])
-
-            item = QTreeWidgetItem(self._tree)
-            item.setText(0, str(fid))
-            item.setText(1, f"{row['timestamp']:.6f}")
-            item.setText(2, f"0x{row['arbitration_id']:03X}")
-            item.setText(3, str(dlc))
-            item.setText(4, str(int(row["channel"])))
-            item.setText(5, hex_data)
-
-            # 存储行在 _filtered_index 中的位置索引，用于展开时解码
-            item.setData(0, Qt.UserRole, iloc_pos)
-
-            # 添加占位子项，使项目在 UI 上显示展开箭头
-            # 没有子项的项目不会显示展开指示器，用户无法点击
-            placeholder = QTreeWidgetItem(item)
-            placeholder.setText(1, "(点击展开解码)")
-            placeholder.setForeground(1, QColor("#777777"))
-
-        self._tree.setUpdatesEnabled(True)
-
-        # 预计算字节变化信息并更新委托
-        self._compute_byte_change_info()
-        self._hex_delegate.update_change_info(self._byte_change_info)
-
-    def _is_placeholder_child(self, item: QTreeWidgetItem) -> bool:
-        """检查项目的子项是否为占位符（未解码状态）"""
-        if item.childCount() != 1:
-            return False
-        child = item.child(0)
-        text = child.text(1)
-        # 占位符文本特征：以 "(" 开头且包含 "点击展开" 或 "加载中"
-        return text.startswith("(") and ("点击展开" in text or "加载中" in text)
-
-    def _on_item_expanded(self, item: QTreeWidgetItem):
-        """展开某行时解码其信号"""
-        # 如果已经有真实解码结果（非占位符），跳过
-        if item.childCount() > 0 and not self._is_placeholder_child(item):
-            return  # 已经解码过
-
-        # 移除占位子项
-        while item.childCount() > 0:
-            item.removeChild(item.child(0))
-
-        iloc_pos = item.data(0, Qt.UserRole)
-        if iloc_pos is None:
-            child = QTreeWidgetItem(item)
-            child.setText(1, "(无法解码: 行索引信息缺失)")
-            child.setForeground(1, QColor("#ef5350"))
-            return
-
-        # 如果 DBC 数据库未加载但路径已设置，尝试重新加载
-        if self._db is None and self._dbc_path:
-            try:
-                self._db = load_dbc_database(self._dbc_path)
-            except Exception as e:
-                child = QTreeWidgetItem(item)
-                child.setText(1, f"(DBC 加载失败: {e})")
-                child.setForeground(1, QColor("#ef5350"))
-                return
-
-        # 如果 DBC 数据库和路径都未设置，显示明确提示
-        if self._db is None:
-            child = QTreeWidgetItem(item)
-            child.setText(1, "(未加载 DBC 数据库，请先加载 DBC 文件)")
-            child.setForeground(1, QColor("#ef5350"))
-            return
-
-        # 通过位置索引从 _filtered_index 获取该行数据
         try:
-            row = self._filtered_index.iloc[iloc_pos]
-        except (IndexError, KeyError) as e:
-            child = QTreeWidgetItem(item)
-            child.setText(1, f"(行索引无效: {e})")
-            child.setForeground(1, QColor("#ef5350"))
-            return
-
-        fid = int(row["frame_id"])
-        dlc = int(row["dlc"])
-        arb_id = int(row["arbitration_id"])
-        frame_data = bytes(self._raw_data[fid, :dlc])
-
-        try:
-            msg_def = self._db.get_message_by_frame_id(arb_id)
-            if msg_def is None:
-                child = QTreeWidgetItem(item)
-                child.setText(1, f"(未找到 ID=0x{arb_id:X} 的报文定义)")
-                child.setForeground(1, QColor("#ef5350"))
-                return
-            decoded = msg_def.decode(frame_data)
-            # 原始（未缩放、未映射枚举名）解码，用于十六进制列与信号描述查表
-            raw_decoded = self._decode_raw(self._db, arb_id, frame_data)
-
-            for sig_name, sig_value in decoded.items():
-                sig_def = next((s for s in msg_def.signals if s.name == sig_name), None)
-                unit = sig_def.unit if sig_def and sig_def.unit else ""
-                raw_val = raw_decoded.get(sig_name)
-                child = QTreeWidgetItem(item)
-                child.setText(0, "")
-                child.setText(1, sig_name)
-                child.setText(2, self._raw_to_hex(raw_val))          # 十六进制值（左侧）
-                child.setText(3, self._val_to_text(sig_value))        # 十进制值（+枚举名）
-                child.setText(4, unit)                                # 单位
-                child.setText(5, self._desc_of(arb_id, sig_name, raw_val))  # 信号描述
-                # 子项用不同颜色区分
-                child.setForeground(1, QColor("#4fc3f7"))
-                child.setForeground(2, QColor("#ffd54f"))
-                child.setForeground(3, QColor("#66bb6a"))
-                child.setForeground(5, QColor("#ba9ffb"))
-        except Exception as e:
-            child = QTreeWidgetItem(item)
-            child.setText(1, f"(解码失败: {e})")
-            child.setForeground(1, QColor("#ef5350"))
-
-    # ────────────────────── 信号值展示增强（十六进制 + 描述） ──────────────────────
-
-    @staticmethod
-    def _val_to_text(val) -> str:
-        """把信号值格式化为文本；枚举信号显示『数值 (枚举名)』。"""
-        if val is None:
-            return ""
-        if hasattr(val, "name") and hasattr(val, "value"):
-            return f"{val.value} ({val.name})"
-        return str(val)
-
-    @staticmethod
-    def _raw_to_hex(val) -> str:
-        """把信号的原始（未缩放）整数值格式化为十六进制字符串。"""
-        if val is None:
-            return ""
-        try:
-            return f"0x{int(val):X}"
-        except (ValueError, TypeError):
-            return ""
-
-    def _decode_raw(self, db, arb_id: int, data: bytes) -> dict:
-        """解码出每个信号的原始（未缩放、未映射枚举名）整数值，用于十六进制列与描述查表。"""
-        try:
-            msg = db.get_message_by_frame_id(arb_id)
-            decoded = msg.decode(data, decode_choices=False, scaling=False)
-            return dict(decoded)
-        except Exception:  # noqa: BLE001
-            return {}
-
-    def _desc_of(self, arb_id: int, sig_name: str, raw_val) -> str:
-        """返回某信号当前原始值对应的描述（DBC choices 优先，Excel 补充）。
-
-        cantools 42 的 signal.choices 值是 NamedSignalValue（str 子类），
-        PyQt5 setText 拒绝 str 子类，故所有返回值统一 str() 归一化。
-        """
-        if raw_val is None:
-            return ""
-        try:
-            key = int(raw_val)
-        except (ValueError, TypeError):
-            return ""
-        desc = self._value_descriptions.get(sig_name, {}).get(key)
-        if desc:
-            return str(desc)
-        if self._db is not None:
-            try:
-                msg = self._db.get_message_by_frame_id(arb_id)
-                for s in msg.signals:
-                    if s.name == sig_name and s.choices:
-                        choice = s.choices.get(key)
-                        if choice is not None:
-                            return str(choice)
-            except Exception:  # noqa: BLE001
-                pass
-        return ""
+            db = load_dbc_database(dbc_path) if dbc_path else None
+        except Exception:
+            db = None
+        self._db = db
+        self._model.set_dbc(db)
+        self._tree.collapseAll()
+        self._model.beginResetModel()
+        self._model._decoded.clear()
+        self._model._decode_err.clear()
+        self._model.endResetModel()
 
     def set_value_descriptions(self, descriptions: dict):
-        """接收 DBC+Excel 合并的值描述 {sig_name: {int_val: 描述}}，
-        用于报文树展开后的『信号描述』列。"""
+        """接收 DBC+Excel 合并的值描述 {sig_name: {int_val: 描述}}"""
         self._value_descriptions = descriptions or {}
+        self._model._value_descriptions = self._value_descriptions
 
     # ────────────────────── 过滤逻辑 ──────────────────────
 
     def _apply_filter(self):
-        """应用过滤条件"""
         if self._frame_index is None:
             return
-
         df = self._frame_index
 
-        # 报文 ID 过滤
         id_text = self._id_filter.currentText()
         if id_text and id_text != "全部":
             try:
-                aid = int(id_text, 16) if id_text.startswith("0x") else int(id_text, 16)
+                aid = int(id_text, 16)
                 df = df[df["arbitration_id"] == aid]
             except ValueError:
                 pass
 
-        # 时间范围过滤
         t_start = self._time_start.text().strip()
         t_end = self._time_end.text().strip()
         if t_start:
@@ -735,7 +718,6 @@ class MessageTableWidget(QWidget):
             except ValueError:
                 pass
 
-        # 信号名过滤 — 需要找到包含该信号的报文 ID
         sig_text = self._sig_filter.text().strip().lower()
         if sig_text and self._messages:
             matching_ids = set()
@@ -746,16 +728,22 @@ class MessageTableWidget(QWidget):
             if matching_ids:
                 df = df[df["arbitration_id"].isin(matching_ids)]
             else:
-                df = df.iloc[0:0]  # 空
+                df = df.iloc[0:0]
 
         self._filtered_index = df
-        self._populate_table()
+        self._recompute_and_set()
 
     def _reset_filter(self):
-        """重置过滤条件"""
         self._id_filter.setCurrentText("全部")
         self._sig_filter.clear()
         self._time_start.clear()
         self._time_end.clear()
         self._filtered_index = self._frame_index
-        self._populate_table()
+        self._recompute_and_set()
+
+    def _recompute_and_set(self):
+        """按当前过滤结果重算字节变化数组并刷新模型（向量化，主线程也很轻量）。"""
+        df = self._filtered_index
+        max_dlc = int(self._raw_data.shape[1]) if self._raw_data is not None and self._raw_data.ndim == 2 else 8
+        byte_change = compute_byte_change_array(df, self._raw_data, max_dlc)
+        self._model.set_data(df, self._raw_data, byte_change)

@@ -12,7 +12,7 @@ from core.signal_cache import SignalCache
 class LoadWorker(QThread):
     """后台线程：加载日志文件并建立索引"""
     progress = pyqtSignal(int)
-    finished = pyqtSignal(object, object)  # (frame_index, raw_data)
+    finished = pyqtSignal(object, object, object)  # (frame_index, raw_data, byte_change)
     error = pyqtSignal(str)
 
     def __init__(self, file_path: str, parent=None):
@@ -22,9 +22,9 @@ class LoadWorker(QThread):
 
     def run(self):
         try:
-            frame_index, raw_data = load_log_file(self._file_path, progress_callback=self._on_progress)
+            frame_index, raw_data, byte_change = load_log_file(self._file_path, progress_callback=self._on_progress)
             if not self._cancelled:
-                self.finished.emit(frame_index, raw_data)
+                self.finished.emit(frame_index, raw_data, byte_change)
         except Exception as e:
             if not self._cancelled:
                 self.error.emit(str(e))
