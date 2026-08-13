@@ -98,7 +98,36 @@ def test_group_search_checkbox_reset_on_research():
     print("    OK: re-search resets checkbox state")
 
 
+def test_switch_group_clears_search():
+    """切分组时若处于跨分组搜索态，必须清空搜索并切到所选分组。
+
+    回归点：原实现在搜索态下 _refresh_signal_list 显示【全部】分组命中项，
+    切换 combo 不改变列表，表现为"切了分组下方列表没切"（偶发，搜索框有残留词时）。
+    """
+    w = _mk_widget()
+    w._refresh_combo()  # 让 combo 感知两个分组
+
+    # 激活跨分组搜索（三个信号都含 'Sig'）
+    w._sig_search.setText("Sig")
+    assert w._search_text != "", "搜索应处于激活态"
+    assert _find(w, "SigOne") is not None, "跨分组视图应含默认组信号"
+    assert _find(w, "SigThree") is not None, "跨分组视图应含 GroupB 信号"
+
+    # 模拟用户在 combo 选中 GroupB（index 1）
+    w._on_group_changed(1)
+
+    # 搜索被清空
+    assert w._search_text == "", "切分组必须清空激活态搜索"
+    assert w._sig_search.text() == "", "搜索框 UI 必须同步清空"
+    # 列表切到所选分组（GroupB 仅 SigThree）
+    assert w._current_group_idx == 1
+    assert _find(w, "SigThree") is not None, "所选分组信号应可见"
+    assert _find(w, "SigOne") is None, "其它分组信号切分组后应不可见"
+    print("    OK: 切分组清空搜索并切到所选分组")
+
+
 if __name__ == "__main__":
     test_group_search_cross_group()
     test_group_search_checkbox_reset_on_research()
+    test_switch_group_clears_search()
     print("ALL GROUP SEARCH TESTS PASSED")
