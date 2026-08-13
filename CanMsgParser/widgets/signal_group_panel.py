@@ -283,6 +283,14 @@ class SignalGroupPanel(QWidget):
             self._refresh_combo()
 
     def _on_group_changed(self, idx: int):
+        # 跨分组搜索态下切换分组无意义：_refresh_signal_list 会显示【全部】分组的
+        # 命中项、不随当前分组变化，表现为"切了分组但下方列表没切"。
+        # 故切换分组时清空搜索，保证"切分组 → 列表切到该组"始终成立。
+        if self._search_text:
+            self._search_text = ""
+            self._sig_search.blockSignals(True)
+            self._sig_search.clear()
+            self._sig_search.blockSignals(False)
         self._current_group_idx = idx
         self._refresh_signal_list()
 
