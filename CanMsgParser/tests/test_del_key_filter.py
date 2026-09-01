@@ -46,7 +46,7 @@ def test_del_on_realtime_sel_list():
     w._sel_list.item(0).setSelected(True)
     _send_del(w._sel_list)
     assert w._sel_list.count() == 1, "按 Delete 后应移除 1 个已选信号"
-    assert w._sel_signals == {("MsgA", "Sig2")}, f"剩余应为 Sig2, got={w._sel_signals}"
+    assert w._sel_signals == [("MsgA", "Sig2")], f"剩余应为 Sig2, got={w._sel_signals}"
     print("    OK: 实时监控页——选中信号按 Delete 移除")
 
 
@@ -108,7 +108,7 @@ def test_del_on_mainwindow_selected_list():
     """主窗口曲线图页：选中已选信号按 Delete 应移除。"""
     from main_window import MainWindow
     w = MainWindow()
-    w._curve_signals = {("MsgA", "Sig1"), ("MsgA", "Sig2")}
+    w._curve_signals = [("MsgA", "Sig1"), ("MsgA", "Sig2")]
     w._refresh_curve_list()
     assert w._selected_list.count() == 2, "曲线图已选列表应有 2 项"
     w._selected_list.item(0).setSelected(True)

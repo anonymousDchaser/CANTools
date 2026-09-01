@@ -398,6 +398,22 @@ class PlotWidget(QWidget):
         """当前实时模式是否已包含该信号曲线（按 (msg_name, sig_name) 匹配）。"""
         return any(k[1] == msg_name and k[2] == sig_name for k in self._rt_meta)
 
+    def reorder_realtime(self, meta: list):
+        """按新顺序重排实时信号曲线并重绘。
+
+        Args:
+            meta: [(frame_id, msg_name, sig_name), ...]，顺序即「已选信号列表」
+                  的新顺序（frame_id 与 start_realtime 传入的保持一致）。
+
+        仅调整 _rt_meta 顺序并重绘（缓冲数据按 key 保留），用于「实时监控页」
+        已选信号列表拖拽排序后，使曲线顺序与列表顺序一致。
+        """
+        if not self._realtime:
+            return
+        order = {k: i for i, k in enumerate(meta)}
+        self._rt_meta.sort(key=lambda k: order.get(k, len(order)))
+        self._redraw()
+
     def set_subplot_mode(self, enabled: bool):
         """设置是否使用独立子图模式（Issue 3：实时监控页默认独立子图）。
 

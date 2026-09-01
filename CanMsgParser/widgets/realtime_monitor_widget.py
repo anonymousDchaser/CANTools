@@ -10,12 +10,13 @@
 """
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QPushButton,
-    QLabel, QMessageBox, QAbstractItemView, QListWidget, QListWidgetItem,
+    QLabel, QMessageBox, QAbstractItemView, QListWidgetItem,
 )
 from PyQt5.QtCore import Qt
 
 from widgets.plot_widget import PlotWidget
 from widgets.del_key_filter import DelKeyFilter
+from widgets.drag_reorder_list import DragReorderListWidget
 from workers.can_capture_worker import CanCaptureWorker
 from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE)
 from core.can_connection import CanConnectionManager
@@ -35,7 +36,7 @@ class RealtimeMonitorWidget(QWidget):
         self._capture_worker: CanCaptureWorker | None = None
         self._monitoring = False
         self._manager: CanConnectionManager | None = None  # 进程内共享连接
-        self._sel_signals: set = set()  # {(msg_name, sig_name)}
+        self._sel_signals: list = []  # [(msg_name, sig_name)]，顺序即列表/曲线顺序
         self._setup_ui()
 
     def _setup_ui(self):
@@ -50,10 +51,16 @@ class RealtimeMonitorWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
 
-        left_layout.addWidget(QLabel("已选信号（可删除）:"))
-        self._sel_list = QListWidget()
+        left_layout.addWidget(QLabel("已选信号（可删除，长按 ⋮⋮ 拖动排序）:"))
+        # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧实时曲线绘制顺序）
+        self._sel_list = DragReorderListWidget()
         self._sel_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._sel_list.setAlternatingRowColors(True)
+        self._sel_list.setToolTip(
+            "长按行右侧 ⋮⋮ 把手并拖动可调整信号顺序；\n"
+            "右侧实时曲线按此列表顺序绘制与显示"
+        )
+        self._sel_list.orderChanged.connect(self._on_sel_order_changed)
         left_layout.addWidget(self._sel_list, stretch=1)
 
         sel_bar = QHBoxLayout()
@@ -126,11 +133,11 @@ class RealtimeMonitorWidget(QWidget):
         self._plot.set_value_descriptions(descriptions)
 
     def add_selected_signals(self, signals: list):
-        """由「信号分组」窗分发按钮添加信号（去重）"""
+        """由「信号分组」窗分发按钮添加信号（去重，保持加入顺序）"""
         added = False
         for msg_name, sig_name in signals:
             if (msg_name, sig_name) not in self._sel_signals:
-                self._sel_signals.add((msg_name, sig_name))
+                self._sel_signals.append((msg_name, sig_name))
                 added = True
         if added:
             self._refresh_sel_list()
@@ -140,7 +147,7 @@ class RealtimeMonitorWidget(QWidget):
     def _refresh_sel_list(self):
         self._sel_list.blockSignals(True)
         self._sel_list.clear()
-        for msg_name, sig_name in sorted(self._sel_signals):
+        for msg_name, sig_name in self._sel_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
             item.setData(Qt.UserRole, (msg_name, sig_name))
             self._sel_list.addItem(item)
@@ -148,7 +155,9 @@ class RealtimeMonitorWidget(QWidget):
 
     def _remove_selected(self):
         for item in self._sel_list.selectedItems():
-            self._sel_signals.discard(item.data(Qt.UserRole))
+            data = item.data(Qt.UserRole)
+            if data in self._sel_signals:
+                self._sel_signals.remove(data)
         self._refresh_sel_list()
         # 移除信号后：实时曲线与采集 worker 同步停止该信号（Bug1 修复）
         self._sync_monitor_signals()
@@ -158,6 +167,23 @@ class RealtimeMonitorWidget(QWidget):
         self._refresh_sel_list()
         # 清空后：曲线与采集同步清空（Bug1 修复）
         self._sync_monitor_signals()
+
+    def _on_sel_order_changed(self):
+        """已选信号列表拖拽排序回调：同步顺序，并按新顺序重排实时曲线。"""
+        order = []
+        for i in range(self._sel_list.count()):
+            data = self._sel_list.item(i).data(Qt.UserRole)
+            if data is not None:
+                order.append(tuple(data))
+        self._sel_signals = order
+        self._reorder_realtime_plot()
+
+    def _reorder_realtime_plot(self):
+        """按已选列表顺序重排右侧实时曲线（不丢失已有缓冲数据）。"""
+        if not self._plot._realtime:
+            return
+        meta = [(self._frame_id_of(m), m, s) for (m, s) in self._sel_signals]
+        self._plot.reorder_realtime(meta)
 
     def _sync_monitor_signals(self):
         """已选信号列表变化后，使实时曲线与采集 worker 与实际选择保持一致：
