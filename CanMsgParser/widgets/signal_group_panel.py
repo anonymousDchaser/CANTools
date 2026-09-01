@@ -13,8 +13,8 @@ import json
 from dataclasses import dataclass, field
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton,
-    QListWidget, QListWidgetItem, QInputDialog, QMessageBox,
-    QFileDialog, QLabel, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
+    QInputDialog, QMessageBox,
+    QFileDialog, QLabel, QAbstractItemView, QTreeWidgetItem,
     QLineEdit, QCheckBox,
 )
 from PyQt5.QtCore import pyqtSignal, Qt, QTimer
@@ -22,6 +22,7 @@ from PyQt5.QtGui import QColor, QFont
 from core.can_data import MessageDef
 from widgets.theme import DARK_PANEL_QSS
 from widgets.del_key_filter import DelKeyFilter
+from widgets.drag_reorder_list import DragReorderTreeWidget
 
 
 @dataclass
@@ -135,7 +136,8 @@ class SignalGroupPanel(QWidget):
         layout.addLayout(sel_bar)
 
         # ─── 信号列表（跨分组搜索时按所属分组归类；备注列可编辑）───
-        self._sig_list = QTreeWidget()
+        # 支持长按行右侧 ⋮⋮ 把手拖拽调整组内信号顺序（顺序随配置持久化）
+        self._sig_list = DragReorderTreeWidget()
         self._sig_list.setColumnCount(2)
         self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
         self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -144,6 +146,7 @@ class SignalGroupPanel(QWidget):
         self._sig_list.setColumnWidth(1, 220)
         self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._sig_list.itemChanged.connect(self._on_sig_checked)
+        self._sig_list.orderChanged.connect(self._on_sig_order_changed)
         layout.addWidget(self._sig_list, stretch=3)
 
         # ─── 分组内信号分发按钮（作用于分组中已勾选的信号）───
@@ -385,16 +388,41 @@ class SignalGroupPanel(QWidget):
             item.setToolTip(0, "当前 DBC 中未找到此信号")
             item.setForeground(0, QColor("#555560"))
 
-        # 备注列：可编辑 QLineEdit（增大行高避免文字显示不全）
+        self._attach_remark_editor(item, sig_ref)
+        return item
+
+    def _attach_remark_editor(self, item: QTreeWidgetItem, sig_ref: SignalRef):
+        """为信号项挂载备注列的可编辑 QLineEdit（供列表构建与拖拽后重建共用）。
+
+        注意：QTreeWidget 的 takeTopLevelItem 会销毁「被移动行」的 item widget
+        （Qt 行为；其余行的 widget 不受影响）。故拖拽排序后只需重建被移动的
+        那一行（见 _rebuild_remark_widget），文本从 sig_ref.remark 恢复；拖拽
+        开始时用户正在编辑的备注会因 QLineEdit 失焦而先触发 editingFinished
+        写回，不会丢失。
+        """
         le = QLineEdit(sig_ref.remark or "")
         le.setPlaceholderText("描述信号功能")
         le.setMinimumHeight(26)
+        matched = (sig_ref.msg_name, sig_ref.sig_name) in self._dbc_lookup
         le.setEnabled(matched)
         le.editingFinished.connect(
             lambda _checked=False, it=item, w=le: self._on_remark_edited(it, w)
         )
         self._sig_list.setItemWidget(item, 1, le)
-        return item
+
+    def _rebuild_remark_widget(self, row: int):
+        """重建指定行的备注编辑框（拖拽排序后让备注随信号行一起移动）。
+
+        只重建被移动的一行：take/insert 仅销毁该行的 item widget，其余行的
+        widget 会被 Qt 原样复用。若全量重建，一次拖拽就要销毁并新建整组的
+        QLineEdit（每组可达数百行），会造成明显卡顿。
+        """
+        if not 0 <= row < self._sig_list.topLevelItemCount():
+            return
+        item = self._sig_list.topLevelItem(row)
+        sig_ref = item.data(0, Qt.UserRole)
+        if sig_ref is not None:
+            self._attach_remark_editor(item, sig_ref)
 
     # ────────────────────── 信号操作 ──────────────────────
 
@@ -402,6 +430,27 @@ class SignalGroupPanel(QWidget):
         """组内信号勾选变化：通知外部页面联动刷新，并刷新全选框状态"""
         self.checked_changed.emit(self.get_checked_signals())
         self._update_check_all_state()
+
+    def _on_sig_order_changed(self):
+        """组内信号列表拖拽排序回调：按列表新顺序重排当前分组 signals。
+
+        顺序写入 SignalGroup.signals（随配置 JSON 持久化）；跨分组搜索态下
+        顶层项为分组标题（无 UserRole 数据），拖拽不会激活，本回调也不会触发。
+        """
+        if self._current_group_idx < 0:
+            return
+        g = self._groups[self._current_group_idx]
+        new_order = []
+        for i in range(self._sig_list.topLevelItemCount()):
+            sig_ref = self._sig_list.topLevelItem(i).data(0, Qt.UserRole)
+            if sig_ref is not None:
+                new_order.append(sig_ref)
+        if len(new_order) == len(g.signals) and new_order != g.signals:
+            g.signals = new_order
+            self._dirty = True
+        # take/insert 已销毁被移动行的备注编辑框（Qt 行为），只重建该行：
+        # 保证备注栏随信号行一起移动且不消失，其余行复用原 widget。
+        self._rebuild_remark_widget(self._sig_list.lastMovedRow())
 
     def _on_group_search(self, text: str):
         """跨分组搜索：按信号名 / 报文名 / 备注过滤（不改动底层数据）。

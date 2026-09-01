@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTabWidget, QMenuBar, QMenu, QAction, QFileDialog, QDockWidget,
     QStatusBar, QProgressBar, QMessageBox, QLabel, QApplication,
-    QPushButton, QListWidget, QListWidgetItem, QAbstractItemView,
+    QPushButton, QListWidgetItem, QAbstractItemView,
 )
 from PyQt5.QtCore import Qt, QEvent, QTimer
 import pandas as pd
@@ -28,6 +28,7 @@ from widgets.realtime_monitor_widget import RealtimeMonitorWidget
 from widgets.signal_sim_widget import SignalSimWidget
 from widgets.replay_widget import ReplayWidget
 from widgets.del_key_filter import DelKeyFilter
+from widgets.drag_reorder_list import DragReorderListWidget
 from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
@@ -381,7 +382,8 @@ class MainWindow(QMainWindow):
         self._load_worker: LoadWorker | None = None
         self._decode_workers: list[DecodeWorker] = []
         # 曲线图已选信号与解码批次代次（分发驱动，替代原信号树）
-        self._curve_signals: set = set()        # {(msg_name, sig_name)}
+        # 有序列表：顺序即列表显示顺序与右侧曲线图绘制顺序（可拖拽调整）
+        self._curve_signals: list = []        # [(msg_name, sig_name)]
         self._curve_decode_gen: int = 0         # 避免过期解码批次误绘
         self._dock_positioned: bool = False     # 分组窗仅首次显示时定位一次
 
@@ -511,13 +513,19 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
 
-        sel_label = QLabel("已选信号（可删除）:")
+        sel_label = QLabel("已选信号（可删除，长按 ⋮⋮ 拖动排序）:")
         sel_label.setStyleSheet("color: #9090a0; font-weight: 500;")
         left_layout.addWidget(sel_label)
 
-        self._selected_list = QListWidget()
+        # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧曲线图绘制顺序）
+        self._selected_list = DragReorderListWidget()
         self._selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._selected_list.setAlternatingRowColors(True)
+        self._selected_list.setToolTip(
+            "长按行右侧 ⋮⋮ 把手并拖动可调整信号顺序；\n"
+            "右侧曲线图按此列表顺序绘制与显示"
+        )
+        self._selected_list.orderChanged.connect(self._on_curve_order_changed)
         left_layout.addWidget(self._selected_list, stretch=1)
 
         # Delete 键移除选中的已选信号（等价于「移除选中」按钮）
@@ -851,20 +859,22 @@ class MainWindow(QMainWindow):
             self._tabs.setCurrentIndex(3)  # 跳转到模拟上报
 
     def _add_curve_signals(self, signals: list):
-        """把分发的信号加入曲线图已选集合（去重）；不自动绘制，绘制由用户点击「绘制」按钮触发"""
+        """把分发的信号按加入顺序追加到曲线图已选列表（去重）；
+        不自动绘制，绘制由用户点击「绘制」按钮触发"""
         added = False
         for msg_name, sig_name in signals:
             if (msg_name, sig_name) not in self._curve_signals:
-                self._curve_signals.add((msg_name, sig_name))
+                self._curve_signals.append((msg_name, sig_name))
                 added = True
         if added:
             self._refresh_curve_list()
 
     def _refresh_curve_list(self):
-        """刷新曲线图「已选信号」列表（按 (msg_name, sig_name) 去重）"""
+        """刷新曲线图「已选信号」列表（按 _curve_signals 顺序显示，
+        顺序即右侧曲线图绘制顺序）"""
         self._selected_list.blockSignals(True)
         self._selected_list.clear()
-        for msg_name, sig_name in sorted(self._curve_signals):
+        for msg_name, sig_name in self._curve_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
             item.setData(Qt.UserRole, (msg_name, sig_name))
             self._selected_list.addItem(item)
@@ -873,7 +883,7 @@ class MainWindow(QMainWindow):
     def _remove_selected_signals(self):
         """从已选列表中移除选中项"""
         for item in self._selected_list.selectedItems():
-            self._curve_signals.discard(item.data(Qt.UserRole))
+            self._curve_signals.remove(item.data(Qt.UserRole))
         self._refresh_curve_list()
 
     def _clear_selected_signals(self):
@@ -883,7 +893,7 @@ class MainWindow(QMainWindow):
 
     def _decode_and_plot_curve(self):
         """对曲线图已选信号解码并绘图（加入即绘图 / 点击「绘制」）"""
-        signals = sorted(self._curve_signals)
+        signals = list(self._curve_signals)  # 按列表顺序（即显示顺序）解码
         if not signals:
             return
         if not self._dbc_path:
@@ -918,12 +928,35 @@ class MainWindow(QMainWindow):
             return
         self._decoded_signals.append(decoded_signal)
         if len(self._decoded_signals) >= len(self._curve_signals):
-            self._plot_widget.plot_signals(self._decoded_signals)
+            # 各信号解码完成顺序不定：按已选列表顺序重排后再绘制
+            self._replot_by_curve_order()
             self._plot_widget.hide_loading()
             self._tabs.setCurrentIndex(1)
             self._statusbar.showMessage(
                 f"绘图完成: {len(self._decoded_signals)} 个信号"
             )
+
+    def _on_curve_order_changed(self):
+        """已选信号列表拖拽排序回调：同步顺序，并按新顺序重绘曲线。
+
+        解码结果已缓存于 _decoded_signals，重排后直接重绘，无需重新解码。
+        """
+        order = []
+        for i in range(self._selected_list.count()):
+            data = self._selected_list.item(i).data(Qt.UserRole)
+            if data is not None:
+                order.append(tuple(data))
+        self._curve_signals = order
+        if self._decoded_signals:
+            self._replot_by_curve_order()
+
+    def _replot_by_curve_order(self):
+        """按 _curve_signals 顺序重排已解码信号并重绘右侧曲线图"""
+        order = {key: i for i, key in enumerate(self._curve_signals)}
+        self._decoded_signals.sort(
+            key=lambda ds: order.get((ds.msg_name, ds.sig_name), len(order))
+        )
+        self._plot_widget.plot_signals(self._decoded_signals)
 
     def _on_connection_changed(self, interface_type: str, channel: str,
                                bitrate: int, connected: bool):

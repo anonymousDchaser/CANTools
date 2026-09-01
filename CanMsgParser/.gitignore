@@ -13,6 +13,8 @@ build/
 # 构建日志与临时备份
 *.log
 _diag.log
+build_log.txt
+build_err.txt
 *.bak_*
 build.bak_*
 dist.bak_*
@@ -20,6 +22,9 @@ build_bak*/
 dist_bak*/
 oldversion*/
 WB101.json
+
+# 工作记忆目录（本地状态，不入库）
+.workbuddy/
 
 # 调试脚本（临时排查用，不应入库）
 tests/_dbg.py
