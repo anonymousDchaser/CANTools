@@ -19,6 +19,8 @@ from PyQt5.QtCore import Qt, QRectF, QSize
 from PyQt5.QtGui import QColor, QBrush, QPen, QFont, QPainter
 from core.can_data import MessageDef, SignalDef
 from utils.bit_utils import get_bit_positions
+from utils.font_helper import UI_FONT_FAMILY, ui_font
+from utils.ui_scale import dp
 
 # 高对比度暖色调色板 — 避免黑色/深色，全部中高亮度
 SIGNAL_COLORS = [
@@ -58,7 +60,7 @@ class BitLayoutView(QWidget):
         QWidget {
             background-color: #1e1e2e;
             color: #e0e0e0;
-            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            font-family: %s;
             font-size: 13px;
         }
         QLabel {
@@ -137,7 +139,7 @@ class BitLayoutView(QWidget):
         QHeaderView::section:hover {
             background-color: #3a3a4e;
         }
-    """
+    """ % UI_FONT_FAMILY
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -152,18 +154,18 @@ class BitLayoutView(QWidget):
     def _setup_ui(self):
         """构建左右分栏布局：左侧搜索+候选列表，右侧位图网格+信号详情"""
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
         layout.setSpacing(4)
 
         # ─── 左侧面板：搜索 + 候选列表 ───
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        left_layout.setSpacing(dp(6))
 
         # 搜索栏
         search_layout = QHBoxLayout()
-        search_layout.setSpacing(8)
+        search_layout.setSpacing(dp(6))
 
         lbl = QLabel("🔍 搜索:")
         search_layout.addWidget(lbl)
@@ -181,8 +183,8 @@ class BitLayoutView(QWidget):
         left_layout.addWidget(self._candidate_list, stretch=1)
 
         # 限制左侧面板宽度
-        left_panel.setMaximumWidth(300)
-        left_panel.setMinimumWidth(200)
+        left_panel.setMaximumWidth(dp(280))
+        left_panel.setMinimumWidth(dp(190))
         layout.addWidget(left_panel)
 
         # ─── 右侧面板：位图网格 + 信号详情 ───
@@ -218,7 +220,7 @@ class BitLayoutView(QWidget):
         header = self._sig_list.header()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.Interactive)  # 信号名列手动调整
-        self._sig_list.setColumnWidth(0, 200)
+        self._sig_list.setColumnWidth(0, dp(190))
         header.setStretchLastSection(True)
 
         right_layout.addWidget(self._sig_list, stretch=1)
@@ -341,11 +343,11 @@ class BitLayoutView(QWidget):
         font_scale = self._scale_factor
 
         # ─── 字体定义（按缩放因子调整）───
-        title_font = QFont("Segoe UI", max(8, int(12 * font_scale)), QFont.Bold)
-        cell_font = QFont("Consolas", max(8, int(11 * font_scale)))            # 位号字体 11pt
-        label_font = QFont("Segoe UI", max(8, int(12 * font_scale)))
-        sig_name_font = QFont("Segoe UI", max(7, int(9 * font_scale)))         # 信号名字体 9pt
-        msb_lsb_font = QFont("Segoe UI", max(6, int(8 * font_scale)), QFont.Bold)  # MSB/LSB 标签字体 8pt
+        title_font = ui_font(max(8, int(12 * font_scale)), bold=True)
+        cell_font = ui_font(max(8, int(11 * font_scale)), mono=True)           # 位号字体 11pt
+        label_font = ui_font(max(8, int(12 * font_scale)))
+        sig_name_font = ui_font(max(7, int(9 * font_scale)))                   # 信号名字体 9pt
+        msb_lsb_font = ui_font(max(6, int(8 * font_scale)), bold=True)         # MSB/LSB 标签字体 8pt
 
         # ─── 绘制标题行（Bit7 ~ Bit0）— 紧贴网格上方 ───
         header_y = -int(cell_h * 0.6)  # 标题行紧贴在网格上方
@@ -500,7 +502,7 @@ class BitLayoutView(QWidget):
         for i in range(self._sig_list.columnCount()):
             self._sig_list.resizeColumnToContents(i)
         # 信号名列保证最小宽度 250px
-        self._sig_list.setColumnWidth(0, 250)
+        self._sig_list.setColumnWidth(0, dp(230))
 
     # ────────────────────── 高亮交互 ──────────────────────
 

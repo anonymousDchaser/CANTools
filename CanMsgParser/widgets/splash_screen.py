@@ -7,6 +7,7 @@ from PyQt5.QtGui import (
     QLinearGradient, QPainterPath,
 )
 from PyQt5.QtCore import Qt, QRectF, QPointF
+from utils.font_helper import ui_font
 
 
 class SplashScreen(QSplashScreen):
@@ -79,7 +80,7 @@ class SplashScreen(QSplashScreen):
         """应用标题"""
         # 主标题
         painter.setPen(QColor("#4fc3f7"))
-        font = QFont("Microsoft YaHei", 22, QFont.Bold)
+        font = ui_font(22, bold=True)
         painter.setFont(font)
         painter.drawText(
             QRectF(0, 20, self.SPLASH_W, 40), Qt.AlignCenter, "CAN 报文分析工具"
@@ -87,7 +88,7 @@ class SplashScreen(QSplashScreen):
 
         # 副标题
         painter.setPen(QColor("#a0a0a0"))
-        font = QFont("Microsoft YaHei", 9)
+        font = ui_font(9)
         painter.setFont(font)
         painter.drawText(
             QRectF(0, 58, self.SPLASH_W, 20),
@@ -208,7 +209,7 @@ class SplashScreen(QSplashScreen):
 
         # 轴标签
         painter.setPen(QColor("#888888"))
-        painter.setFont(QFont("Microsoft YaHei", 7))
+        painter.setFont(ui_font(7))
         painter.drawText(QRectF(-5, 5, 20, 15), Qt.AlignCenter, "V")
         painter.drawText(QRectF(w - 15, h - 8, 20, 15), Qt.AlignCenter, "t")
 
@@ -239,7 +240,7 @@ class SplashScreen(QSplashScreen):
         """状态文字 + 百分比 + 版权"""
         # 状态描述
         painter.setPen(QColor("#cccccc"))
-        painter.setFont(QFont("Microsoft YaHei", 9))
+        painter.setFont(ui_font(9))
         painter.drawText(
             QRectF(40, self.SPLASH_H - 75, 400, 20),
             Qt.AlignLeft,
@@ -248,7 +249,7 @@ class SplashScreen(QSplashScreen):
 
         # 百分比数字
         painter.setPen(QColor("#4fc3f7"))
-        painter.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        painter.setFont(ui_font(10, bold=True))
         painter.drawText(
             QRectF(self.SPLASH_W - 140, self.SPLASH_H - 75, 100, 20),
             Qt.AlignRight,
@@ -257,7 +258,7 @@ class SplashScreen(QSplashScreen):
 
         # 底部版权信息
         painter.setPen(QColor("#666666"))
-        painter.setFont(QFont("Microsoft YaHei", 7))
+        painter.setFont(ui_font(7))
         painter.drawText(
             QRectF(40, self.SPLASH_H - 22, self.SPLASH_W - 80, 15),
             Qt.AlignLeft,

@@ -28,3 +28,12 @@ WB101.json
 
 # 调试脚本（临时排查用，不应入库）
 tests/_dbg.py
+
+# macOS（Finder 元数据，Windows 侧不会产生）
+.DS_Store
+.AppleDouble
+._*
+
+# 虚拟环境（macOS 用户按 README 在 .venv 中安装依赖）
+.venv/
+venv/

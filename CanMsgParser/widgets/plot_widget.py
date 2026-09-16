@@ -19,10 +19,13 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLab
 from PyQt5.QtCore import Qt
 from core.can_data import DecodedSignal
 from utils.lttb import lttb_downsample
+from utils.font_helper import UI_FONT_FAMILY, apply_matplotlib_fonts
+from utils.ui_scale import dp
 
-# ─── 中文字体支持（Windows 环境下正确渲染中文）───
-matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
-matplotlib.rcParams['axes.unicode_minus'] = False
+# ─── 中文字体支持（Windows / macOS / Linux 均正确渲染中文）───
+# 原实现只列了 Windows 字体，macOS 上会回落到不含中文字形的 DejaVu Sans，
+# 导致曲线图标题/图例显示为方框；改由 font_helper 按平台给出候选。
+apply_matplotlib_fonts()
 
 # 降采样阈值
 DOWNSAMPLE_THRESHOLD = 10000
@@ -61,7 +64,7 @@ class PlotWidget(QWidget):
         QWidget {
             background-color: #1e1e2e;
             color: #e0e0e0;
-            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            font-family: %s;
             font-size: 13px;
         }
         QPushButton {
@@ -102,7 +105,7 @@ class PlotWidget(QWidget):
             background-color: #4a4a5e;
             border-color: #4fc3f7;
         }
-    """
+    """ % UI_FONT_FAMILY
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -138,12 +141,12 @@ class PlotWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(dp(6), dp(6), dp(6), dp(6))
+        layout.setSpacing(dp(5))
 
         # ─── 工具栏 ───
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        toolbar.setSpacing(dp(6))
 
         self._mode_btn = QPushButton("切换为共享Y轴")
         self._mode_btn.setToolTip("在共享Y轴和独立子图模式之间切换")

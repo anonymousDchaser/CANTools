@@ -26,6 +26,8 @@ import cantools
 from core.can_utils import load_dbc_database
 from core.can_data import MessageDef
 from core.byte_change import compute_byte_change_array, NO_CHANGE
+from utils.font_helper import UI_FONT_FAMILY, MONO_FONT_FAMILY, ui_font
+from utils.ui_scale import dp
 
 
 class MessageTableModel(QAbstractItemModel):
@@ -414,7 +416,7 @@ class HexDataDelegate(QStyledItemDelegate):
         else:
             painter.fillRect(option.rect, self.BG_COLOR)
 
-        font = QFont("Consolas", 9)
+        font = ui_font(9, mono=True)
         fm = QFontMetrics(font)
         painter.setFont(font)
 
@@ -445,7 +447,7 @@ class MessageTableWidget(QWidget):
         QWidget {
             background-color: #1e1e2e;
             color: #e0e0e0;
-            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            font-family: %s;
             font-size: 13px;
         }
         QLabel {
@@ -515,7 +517,7 @@ class MessageTableWidget(QWidget):
             border-radius: 4px;
             outline: none;
             gridline-color: #3a3a4e;
-            font-family: "Consolas", "Cascadia Code", monospace;
+            font-family: %s;
             font-size: 12px;
         }
         QTreeView::item {
@@ -552,7 +554,7 @@ class MessageTableWidget(QWidget):
         QHeaderView::section:hover {
             background-color: #3a3a4e;
         }
-    """
+    """ % (UI_FONT_FAMILY, MONO_FONT_FAMILY)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -570,12 +572,12 @@ class MessageTableWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(dp(8), dp(8), dp(8), dp(8))
+        layout.setSpacing(dp(6))
 
         # ─── 过滤栏 ───
         filter_layout = QHBoxLayout()
-        filter_layout.setSpacing(8)
+        filter_layout.setSpacing(dp(6))
 
         lbl_id = QLabel("报文ID:")
         lbl_id.setStyleSheet("font-weight: bold;")
@@ -583,7 +585,7 @@ class MessageTableWidget(QWidget):
 
         self._id_filter = QComboBox()
         self._id_filter.setEditable(True)
-        self._id_filter.setFixedWidth(130)
+        self._id_filter.setFixedWidth(dp(118))
         self._id_filter.setToolTip("输入或选择报文 ID（十六进制）")
         filter_layout.addWidget(self._id_filter)
 
@@ -593,7 +595,7 @@ class MessageTableWidget(QWidget):
 
         self._sig_filter = QLineEdit()
         self._sig_filter.setPlaceholderText("模糊搜索...")
-        self._sig_filter.setFixedWidth(160)
+        self._sig_filter.setFixedWidth(dp(145))
         self._sig_filter.setToolTip("按信号名模糊过滤")
         filter_layout.addWidget(self._sig_filter)
 
@@ -603,14 +605,14 @@ class MessageTableWidget(QWidget):
 
         self._time_start = QLineEdit()
         self._time_start.setPlaceholderText("起始(s)")
-        self._time_start.setFixedWidth(90)
+        self._time_start.setFixedWidth(dp(90))
         filter_layout.addWidget(self._time_start)
 
         filter_layout.addWidget(QLabel("~"))
 
         self._time_end = QLineEdit()
         self._time_end.setPlaceholderText("结束(s)")
-        self._time_end.setFixedWidth(90)
+        self._time_end.setFixedWidth(dp(90))
         filter_layout.addWidget(self._time_end)
 
         self._apply_btn = QPushButton("🔍 应用过滤")

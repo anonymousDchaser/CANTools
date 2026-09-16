@@ -1,14 +1,20 @@
 # widgets/signal_tree.py
-"""信号树组件：展示 DBC 中的报文和信号，支持搜索和勾选"""
+"""信号检索视图（独立停靠窗）：搜索 DBC 报文与信号，勾选后分发或加入分组。
+
+布局采用**左右分栏**：左侧是搜索树（+ 分发按钮），右侧是「已勾选信号」列表
+（+ 移除/加入分组按钮）。两侧各自纵向占满，避免二者在同一纵向布局里平分高度、
+把搜索树挤到只剩一两行。面板较窄时（如停靠在主窗口左侧栏）自动切换为上下堆叠。
+"""
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLineEdit, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QListWidget, QListWidgetItem,
-    QAbstractItemView, QLabel, QCheckBox,
+    QAbstractItemView, QLabel, QCheckBox, QSplitter, QHeaderView,
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
 from widgets.del_key_filter import DelKeyFilter
 from widgets.theme import DARK_PANEL_QSS
+from utils.ui_scale import dp
 
 
 class SignalTreeWidget(QWidget):
@@ -19,6 +25,12 @@ class SignalTreeWidget(QWidget):
     # 将已勾选信号加入"信号分组"视图的当前分组
     add_to_group_requested = pyqtSignal(list)
 
+    # 面板宽度低于该设计基准值时，左右分栏切换为上下堆叠（见 _sync_split_orientation）。
+    # 取 430：实测停靠列宽 460、490、650 时左右分栏都能给出
+    # 更多可见行（树取整个面板高，而不像上下堆叠那样被
+    # 已勾选列表分走一半高度）。
+    _SPLIT_FLIP_WIDTH = 430
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._messages: list[MessageDef] = []
@@ -28,19 +40,22 @@ class SignalTreeWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(dp(6), dp(6), dp(6), dp(6))
+        layout.setSpacing(dp(6))
+
+        # ── 顶部工具行：搜索框 + 全选（合并为同一行，省下一整行高度）──
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(dp(6))
 
         # 搜索框（带搜索图标占位提示）
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("\U0001f50d 搜索报文名称 / CAN ID...")
+        self._search_input.setPlaceholderText("\U0001f50d 搜索报文 / 信号 / CAN ID")
+        self._search_input.setClearButtonEnabled(True)
         self._search_input.textChanged.connect(self._on_search)
-        layout.addWidget(self._search_input)
+        top_bar.addWidget(self._search_input, stretch=1)
 
         # 单一「全选」勾选框（操作当前可见信号）：勾选=全选可见信号，
         # 取消=全不选；任一可见信号取消勾选时，本框自动变为未勾选。
-        sel_bar = QHBoxLayout()
-        sel_bar.setSpacing(8)
         self._check_all_chk = QCheckBox("全选")
         self._check_all_chk.setToolTip(
             "勾选：选中当前搜索结果中所有可见信号；\n"
@@ -50,64 +65,139 @@ class SignalTreeWidget(QWidget):
         self._check_all_chk.stateChanged.connect(
             lambda _s: self._on_check_all(self._check_all_chk.isChecked())
         )
-        sel_bar.addWidget(self._check_all_chk)
-        sel_bar.addStretch()
-        layout.addLayout(sel_bar)
+        top_bar.addWidget(self._check_all_chk)
+        layout.addLayout(top_bar)
 
-        # 树形列表
+        # ── 主体：左右分栏（左=搜索树，右=已勾选信号）──
+        # 旧布局把树与勾选列表纵向堆叠，两者都未设拉伸系数，Qt 会把剩余高度
+        # 50/50 平分，再扣掉搜索框/全选/分发/按钮等固定行，树只剩一两行。
+        # 改为左右分栏后两侧各自纵向占满，树的行数只取决于面板高度。
+        self._split = QSplitter(Qt.Horizontal)
+        self._split.setChildrenCollapsible(False)
+        self._split.setHandleWidth(dp(4))
+
+        # ─── 左列：搜索树 + 分发按钮 ───
+        left_col = QWidget()
+        left_layout = QVBoxLayout(left_col)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(dp(4))
+
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["名称", "ID/类型"])
-        self._tree.setColumnWidth(0, 200)
         self._tree.setAlternatingRowColors(True)
+        # 行高统一时可跳过逐行测量，长列表滚动更顺滑
+        self._tree.setUniformRowHeights(True)
+        self._tree.setMinimumWidth(dp(150))
+        # 缩进 20px -> 14px：信号是报文的子项，缩进直接吃掉名称列的可视宽度，
+        # 收紧后长信号名能多显示 1~2 个字符
+        self._tree.setIndentation(dp(14))
+        # 名称列自适应剩余宽度、ID 列按内容自适应：窄面板下不再被固定列宽撑开
+        _header = self._tree.header()
+        _header.setSectionResizeMode(0, QHeaderView.Stretch)
+        _header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        _header.setStretchLastSection(False)
         self._tree.itemChanged.connect(self._on_item_changed)
-        layout.addWidget(self._tree)
+        left_layout.addWidget(self._tree, stretch=1)
 
         # 分发按钮栏：将搜索树中勾选的信号发送到曲线图/实时监控/模拟上报
+        # （文案精简 + compact 样式，三个按钮一行放得下，省去一整行高度）
         dispatch_bar = QHBoxLayout()
-        dispatch_bar.setSpacing(6)
-        for _target, _label in (
-            ("curve", "添加到曲线图"),
-            ("monitor", "添加到实时监控"),
-            ("sim", "添加到模拟上报"),
+        dispatch_bar.setSpacing(dp(4))
+        for _target, _label, _tip in (
+            ("curve", "曲线图", "将已勾选信号添加到曲线图"),
+            ("monitor", "实时监控", "将已勾选信号添加到实时监控"),
+            ("sim", "模拟上报", "将已勾选信号添加到模拟上报"),
         ):
             _btn = QPushButton(_label)
+            _btn.setProperty("class", "compact")
+            _btn.setToolTip(_tip)
             _btn.clicked.connect(
                 lambda _checked=False, t=_target: self._on_dispatch(t)
             )
             dispatch_bar.addWidget(_btn)
-        layout.addLayout(dispatch_bar)
+        dispatch_bar.addStretch()
+        left_layout.addLayout(dispatch_bar)
+        self._split.addWidget(left_col)
 
-        # ─── 当前已勾选信号显示（跨搜索持久、可单独移除）───
-        checked_label = QLabel("已勾选信号（跨搜索保留）:")
-        checked_label.setStyleSheet("color: #9090a0; font-weight: 500;")
-        layout.addWidget(checked_label)
+        # ─── 右列：当前已勾选信号显示（跨搜索持久、可单独移除）───
+        right_col = QWidget()
+        right_layout = QVBoxLayout(right_col)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(dp(4))
+
+        self._checked_count_label = QLabel("已勾选: 0")
+        self._checked_count_label.setToolTip(
+            "当前已勾选（含因搜索被隐藏）的信号数量；\n"
+            "列表项可移除，会同步取消搜索树中的勾选"
+        )
+        right_layout.addWidget(self._checked_count_label)
 
         self._checked_list = QListWidget()
         self._checked_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._checked_list.setAlternatingRowColors(True)
-        self._checked_list.setMinimumHeight(90)
+        self._checked_list.setMinimumWidth(dp(130))
+        self._checked_list.setMinimumHeight(dp(60))
         self._checked_list.setToolTip(
             "当前已勾选（含因搜索被隐藏）的信号；可在此移除，会同步取消搜索树中的勾选"
         )
-        layout.addWidget(self._checked_list)
+        right_layout.addWidget(self._checked_list, stretch=1)
 
-        # Delete 键移除选中的已勾选信号（等价于「移除选中」按钮）
-        self._del_filter = DelKeyFilter(self._checked_list, self._on_remove_checked)
+        # 两个按钮并排：统一走紧凑尺寸（compact / compact-primary 的 padding、
+        # min-height、字号完全一致），并各占一半宽度，避免一大一小不齐。
+        checked_btn_bar = QHBoxLayout()
+        checked_btn_bar.setSpacing(dp(4))
 
-        checked_remove_bar = QHBoxLayout()
+        self._checked_remove_btn = QPushButton("移除选中")
+        self._checked_remove_btn.setProperty("class", "compact")
+        self._checked_remove_btn.setToolTip("从已勾选列表中移除，并同步取消搜索树中的勾选")
+        self._checked_remove_btn.clicked.connect(self._on_remove_checked)
+        checked_btn_bar.addWidget(self._checked_remove_btn, 1)
+
         self._add_to_group_btn = QPushButton("加入分组")
-        self._add_to_group_btn.setProperty("class", "primary")
+        self._add_to_group_btn.setProperty("class", "compact-primary")
         self._add_to_group_btn.setToolTip("将已勾选信号加入「信号分组」视图的当前分组")
         self._add_to_group_btn.clicked.connect(
             lambda: self.add_to_group_requested.emit(self.get_checked_signals())
         )
-        checked_remove_bar.addWidget(self._add_to_group_btn)
-        self._checked_remove_btn = QPushButton("移除选中")
-        self._checked_remove_btn.setToolTip("从已勾选列表中移除，并同步取消搜索树中的勾选")
-        self._checked_remove_btn.clicked.connect(self._on_remove_checked)
-        checked_remove_bar.addWidget(self._checked_remove_btn)
-        checked_remove_bar.addStretch()
-        layout.addLayout(checked_remove_bar)
+        checked_btn_bar.addWidget(self._add_to_group_btn, 1)
+        right_layout.addLayout(checked_btn_bar)
+        self._split.addWidget(right_col)
+
+        self._split.setStretchFactor(0, 3)
+        self._split.setStretchFactor(1, 2)
+        self._split.setSizes([dp(420), dp(280)])
+        layout.addWidget(self._split, stretch=1)
+
+        # Delete 键移除选中的已勾选信号（等价于「移除选中」按钮）
+        self._del_filter = DelKeyFilter(self._checked_list, self._on_remove_checked)
+
+    # ────────────────────── 响应式布局 ──────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_split_orientation()
+
+    def _sync_split_orientation(self):
+        """面板变窄时把左右分栏切成上下堆叠。
+
+        停靠在主窗口左侧栏时面板往往只有 300~520px 宽，继续左右分栏会让搜索树
+        窄到看不清信号名；此时改为上下堆叠（树在上、已勾选在下），两侧仍各自保留
+        可用的高度。阈值取 520px（设计基准值，随全局缩放系数换算）。
+        """
+        if not hasattr(self, "_split"):
+            return
+        want = (
+            Qt.Horizontal
+            if self.width() >= dp(self._SPLIT_FLIP_WIDTH)
+            else Qt.Vertical
+        )
+        if want == self._split.orientation():
+            return
+        self._split.setOrientation(want)
+        if want == Qt.Horizontal:
+            self._split.setSizes([dp(420), dp(280)])
+        else:
+            self._split.setSizes([dp(300), dp(140)])
 
     def _on_dispatch(self, target: str):
         """把搜索树中勾选的信号分发到指定目标页（曲线图/实时监控/模拟上报）"""
@@ -242,11 +332,16 @@ class SignalTreeWidget(QWidget):
         """
         self._checked_list.blockSignals(True)
         self._checked_list.clear()
-        for msg_name, sig_name in self.get_checked_signals():
+        pairs = self.get_checked_signals()
+        for msg_name, sig_name in pairs:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
             item.setData(Qt.UserRole, (msg_name, sig_name))
+            # 右列较窄时文本仍可能被截断，悬停可见完整「信号名 + 所属报文」
+            item.setToolTip(f"{sig_name}\n所属报文: {msg_name}")
             self._checked_list.addItem(item)
         self._checked_list.blockSignals(False)
+        # 数量提示：面板较窄、列表看不全时，靠计数即可确认当前勾选规模
+        self._checked_count_label.setText(f"已勾选: {len(pairs)}")
 
     def _on_remove_checked(self):
         """从已勾选列表中移除选中项，并同步取消搜索树中的对应勾选。

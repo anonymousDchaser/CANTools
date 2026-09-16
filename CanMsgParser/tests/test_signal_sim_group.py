@@ -166,7 +166,12 @@ def test_grouping_and_aggregation():
         w._resolve_raw = lambda k: (True, 7, "")  # SigC=7
         w._start_group(0x3E4)
         assert g3e4["sending"] is True, "组应进入发送态"
-        assert g3e4["timer"] is not None, "组应创建定时器"
+        # 周期发送已由主线程 QTimer 改为独立发送线程（否则 Windows 拖动 / 切换
+        # 窗口时 modal move loop 会阻塞主线程事件循环，导致上报暂停）
+        assert w._worker is not None and w._worker.isRunning(), \
+            "启动组应拉起独立发送线程"
+        assert w._worker._groups.get(0x3E4, {}).get("enabled") is True, \
+            "发送线程应启用该报文组"
         captured.clear()
         w._tick_group(0x3E4)
         assert len(captured) == 1 and captured[0].arbitration_id == 0x3E4

@@ -18,6 +18,7 @@ from core.can_utils import (
     DEVICE_TYPES, interface_available,
 )
 from core.can_connection import CanConnectionManager
+from utils.ui_scale import dp
 
 
 class ConnectionStatusWidget(QWidget):
@@ -36,13 +37,13 @@ class ConnectionStatusWidget(QWidget):
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(16)
+        root.setContentsMargins(dp(14), dp(14), dp(14), dp(14))
+        root.setSpacing(dp(12))
 
         # ─── 协议数据加载 ───
         proto_group = QGroupBox("协议数据加载")
         proto_layout = QVBoxLayout(proto_group)
-        proto_layout.setSpacing(10)
+        proto_layout.setSpacing(dp(8))
 
         self._excel_label = QLabel("未加载")
         self._dbc_label = QLabel("未加载")
@@ -63,7 +64,7 @@ class ConnectionStatusWidget(QWidget):
         # ─── CAN 总线连接 ───
         can_group = QGroupBox("CAN 总线连接")
         can_layout = QVBoxLayout(can_group)
-        can_layout.setSpacing(10)
+        can_layout.setSpacing(dp(8))
 
         self._can_status = QLabel("未连接")
         self._can_status.setStyleSheet("color: #ef5350; font-weight: bold;")
@@ -71,7 +72,7 @@ class ConnectionStatusWidget(QWidget):
 
         # 设备类型选择（同星 / PEAK / Vector / 虚拟）
         dev_row = QHBoxLayout()
-        dev_row.setSpacing(8)
+        dev_row.setSpacing(dp(6))
         dev_row.addWidget(QLabel("设备类型:"))
         self._device_combo = QComboBox()
         # 保存 (key, label) 顺序，key 用于连接，label 用于显示
@@ -91,7 +92,7 @@ class ConnectionStatusWidget(QWidget):
         can_layout.addLayout(dev_row)
 
         ch_row = QHBoxLayout()
-        ch_row.setSpacing(8)
+        ch_row.setSpacing(dp(6))
         ch_row.addWidget(QLabel("通道:"))
         self._channel_combo = QComboBox()
         self._channel_combo.setEditable(True)
@@ -135,9 +136,9 @@ class ConnectionStatusWidget(QWidget):
 
     def _make_loader_row(self, title, label, slot):
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(dp(6))
         t = QLabel(title)
-        t.setMinimumWidth(170)
+        t.setMinimumWidth(dp(150))
         row.addWidget(t)
         row.addWidget(label, stretch=1)
         btn = QPushButton("加载")

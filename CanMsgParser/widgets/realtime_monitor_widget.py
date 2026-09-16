@@ -21,6 +21,7 @@ from workers.can_capture_worker import CanCaptureWorker
 from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE)
 from core.can_connection import CanConnectionManager
 from core.can_data import MessageDef
+from utils.ui_scale import dp
 
 
 class RealtimeMonitorWidget(QWidget):
@@ -41,7 +42,7 @@ class RealtimeMonitorWidget(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -49,9 +50,9 @@ class RealtimeMonitorWidget(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_layout.setSpacing(dp(5))
 
-        left_layout.addWidget(QLabel("已选信号（可删除，长按 ⋮⋮ 拖动排序）:"))
+        left_layout.addWidget(QLabel("已选信号（长按 ⋮⋮ 拖动排序）:"))
         # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧实时曲线绘制顺序）
         self._sel_list = DragReorderListWidget()
         self._sel_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -65,9 +66,11 @@ class RealtimeMonitorWidget(QWidget):
 
         sel_bar = QHBoxLayout()
         self._remove_btn = QPushButton("移除选中")
+        self._remove_btn.setProperty("class", "compact")
         self._remove_btn.clicked.connect(self._remove_selected)
         sel_bar.addWidget(self._remove_btn)
         self._clear_btn = QPushButton("清空")
+        self._clear_btn.setProperty("class", "compact")
         self._clear_btn.clicked.connect(self._clear_selected)
         sel_bar.addWidget(self._clear_btn)
         left_layout.addLayout(sel_bar)
@@ -78,10 +81,10 @@ class RealtimeMonitorWidget(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(dp(5))
 
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(8)
+        ctrl.setSpacing(dp(6))
         self._status_label = QLabel("未连接")
         self._status_label.setStyleSheet("color: #9090a0;")
         ctrl.addWidget(self._status_label)

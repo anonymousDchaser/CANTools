@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton,
     QInputDialog, QMessageBox,
     QFileDialog, QLabel, QAbstractItemView, QTreeWidgetItem,
-    QLineEdit, QCheckBox,
+    QLineEdit, QCheckBox, QHeaderView,
 )
 from PyQt5.QtCore import pyqtSignal, Qt, QTimer
 from PyQt5.QtGui import QColor, QFont
@@ -23,6 +23,7 @@ from core.can_data import MessageDef
 from widgets.theme import DARK_PANEL_QSS
 from widgets.del_key_filter import DelKeyFilter
 from widgets.drag_reorder_list import DragReorderTreeWidget
+from utils.ui_scale import dp
 
 
 @dataclass
@@ -70,38 +71,45 @@ class SignalGroupPanel(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(dp(8), dp(8), dp(8), dp(8))
+        layout.setSpacing(dp(6))
 
         # ─── 分组选择栏 ───
+        # 文案精简（"保存配置/加载配置/删除分组" -> "保存/加载/删除"，语义交给
+        # tooltip），配合 compact 样式后整条工具栏在窄列里也能一行放下——原实现
+        # 5 个 emoji 长按钮 + 180px 下拉框把面板最小宽度撑到 700px 以上。
         group_bar = QHBoxLayout()
-        group_bar.setSpacing(8)
+        group_bar.setSpacing(dp(6))
 
         lbl = QLabel("分组:")
         lbl.setStyleSheet("font-weight: bold;")
         group_bar.addWidget(lbl)
 
         self._group_combo = QComboBox()
-        self._group_combo.setMinimumWidth(180)
+        self._group_combo.setMinimumWidth(dp(140))
         self._group_combo.currentIndexChanged.connect(self._on_group_changed)
         group_bar.addWidget(self._group_combo)
 
         self._new_btn = QPushButton("+ 新建")
+        self._new_btn.setProperty("class", "compact")
         self._new_btn.setToolTip("创建新的信号分组")
         self._new_btn.clicked.connect(self._create_group)
         group_bar.addWidget(self._new_btn)
 
-        self._save_btn = QPushButton("💾 保存配置")
+        self._save_btn = QPushButton("💾 保存")
+        self._save_btn.setProperty("class", "compact")
         self._save_btn.setToolTip("将分组配置保存到 JSON 文件")
         self._save_btn.clicked.connect(self._save_config)
         group_bar.addWidget(self._save_btn)
 
-        self._load_btn = QPushButton("📂 加载配置")
+        self._load_btn = QPushButton("📂 加载")
+        self._load_btn.setProperty("class", "compact")
         self._load_btn.setToolTip("从 JSON 文件加载分组配置")
         self._load_btn.clicked.connect(self._load_config)
         group_bar.addWidget(self._load_btn)
 
-        self._delete_btn = QPushButton("🗑 删除分组")
+        self._delete_btn = QPushButton("🗑 删除")
+        self._delete_btn.setProperty("class", "compact")
         self._delete_btn.setToolTip("删除当前选中的分组")
         self._delete_btn.setStyleSheet("""
             QPushButton { border-color: #ef5350; color: #ef5350; }
@@ -113,15 +121,17 @@ class SignalGroupPanel(QWidget):
         group_bar.addStretch()
         layout.addLayout(group_bar)
 
-        # ─── 组内信号搜索框（跨分组搜索：信号名 / 报文名 / 帧 ID / 备注）───
-        self._sig_search = QLineEdit()
-        self._sig_search.setPlaceholderText("🔍 搜索信号名 / 报文名 / 备注（跨分组）…")
-        self._sig_search.textChanged.connect(self._on_group_search)
-        layout.addWidget(self._sig_search)
+        # ─── 搜索栏：组内信号搜索 + 单一「全选」勾选框 ───
+        # 两者合并为同一行（原实现各占一行），省下一整行高度给信号列表。
+        search_bar = QHBoxLayout()
+        search_bar.setSpacing(dp(6))
 
-        # ─── 单一「全选」勾选框（紧贴搜索框下方，与信号检索视图一致）───
-        sel_bar = QHBoxLayout()
-        sel_bar.setSpacing(8)
+        self._sig_search = QLineEdit()
+        self._sig_search.setPlaceholderText("\U0001f50d 搜索信号名 / 报文名 / 备注（跨分组）")
+        self._sig_search.setClearButtonEnabled(True)
+        self._sig_search.textChanged.connect(self._on_group_search)
+        search_bar.addWidget(self._sig_search, stretch=1)
+
         self._check_all_chk = QCheckBox("全选")
         self._check_all_chk.setToolTip(
             "勾选：选中当前可见（含跨分组搜索结果）的所有信号；\n"
@@ -131,9 +141,8 @@ class SignalGroupPanel(QWidget):
         self._check_all_chk.stateChanged.connect(
             lambda _s: self._on_check_all(self._check_all_chk.isChecked())
         )
-        sel_bar.addWidget(self._check_all_chk)
-        sel_bar.addStretch()
-        layout.addLayout(sel_bar)
+        search_bar.addWidget(self._check_all_chk)
+        layout.addLayout(search_bar)
 
         # ─── 信号列表（跨分组搜索时按所属分组归类；备注列可编辑）───
         # 支持长按行右侧 ⋮⋮ 把手拖拽调整组内信号顺序（顺序随配置持久化）
@@ -142,26 +151,37 @@ class SignalGroupPanel(QWidget):
         self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
         self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._sig_list.setAlternatingRowColors(True)
-        self._sig_list.setColumnWidth(0, 300)
-        self._sig_list.setColumnWidth(1, 220)
+        # 信号列用 Interactive（列宽由 _autosize_signal_column 按内容自适应，
+        # 之后仍可手动拖动），备注列吃掉剩余宽度：既不再用两个固定列宽
+        # （原 300 + 220）把面板最小宽度顶到 700px 以上，也不会因固定列宽
+        # 截断较长的信号名。
+        _header = self._sig_list.header()
+        _header.setSectionResizeMode(0, QHeaderView.Interactive)
+        _header.setSectionResizeMode(1, QHeaderView.Stretch)
+        self._sig_list.setColumnWidth(0, dp(150))   # 兜底初值，随列表刷新重算
+        # 与「信号检索」树一致：跨分组搜索的子项缩进收紧，少占名称列宽度
+        self._sig_list.setIndentation(dp(14))
         self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._sig_list.itemChanged.connect(self._on_sig_checked)
         self._sig_list.orderChanged.connect(self._on_sig_order_changed)
-        layout.addWidget(self._sig_list, stretch=3)
+        layout.addWidget(self._sig_list, stretch=1)
 
         # ─── 分组内信号分发按钮（作用于分组中已勾选的信号）───
         group_dispatch_bar = QHBoxLayout()
-        group_dispatch_bar.setSpacing(6)
-        for _target, _label in (
-            ("curve", "添加到曲线图"),
-            ("monitor", "添加到实时监控"),
-            ("sim", "添加到模拟上报"),
+        group_dispatch_bar.setSpacing(dp(4))
+        for _target, _label, _tip in (
+            ("curve", "曲线图", "将分组中已勾选的信号添加到曲线图"),
+            ("monitor", "实时监控", "将分组中已勾选的信号添加到实时监控"),
+            ("sim", "模拟上报", "将分组中已勾选的信号添加到模拟上报"),
         ):
             _btn = QPushButton(_label)
+            _btn.setProperty("class", "compact")
+            _btn.setToolTip(_tip)
             _btn.clicked.connect(
                 lambda _checked=False, t=_target: self._on_group_dispatch(t)
             )
             group_dispatch_bar.addWidget(_btn)
+        group_dispatch_bar.addStretch()
         layout.addLayout(group_dispatch_bar)
 
         # Delete 键移除选中信号（保留既有 DEL 快捷键移除能力）
@@ -359,6 +379,43 @@ class SignalGroupPanel(QWidget):
         self._sig_list.blockSignals(False)
         # 重新搜索 -> 勾选框归位（单次搜索仅保留当前勾选）
         self._update_check_all_state()
+        # 内容变了，信号列宽按新内容重算（尽量让信号名完整可见）
+        self._autosize_signal_column()
+
+    def _autosize_signal_column(self):
+        """把「信号」列宽调到恰好容纳当前最长文本，尽量让信号名完整可见。
+
+        列内容形如「信号名  (报文名 · 帧ID)」，长度差异很大：固定列宽要么截断
+        长信号名，要么在短内容下白占宽度。这里用字体度量实测最长一行，夹在
+        [120px, 视口宽度 60%] 之间 —— 上限取 60% 是为给「备注」列留出可编辑的
+        空间。列仍为 Interactive，用户可手动拖动覆盖，下次列表刷新会再重算。
+        """
+        tree = getattr(self, "_sig_list", None)
+        if tree is None:
+            return  # 构造期 resizeEvent 早于 _setup_ui，尚无列表控件
+        fm = tree.fontMetrics()
+        text_width = getattr(fm, "horizontalAdvance", None) or fm.width
+        indentation = tree.indentation()
+        widest = 0
+        stack = [(tree.topLevelItem(i), 0) for i in range(tree.topLevelItemCount())]
+        while stack:
+            item, depth = stack.pop()
+            # 勾选框/展开箭头 + 逐层缩进 + 单元格左右内边距
+            need = text_width(item.text(0)) + dp(24) + depth * indentation
+            if need > widest:
+                widest = need
+            for k in range(item.childCount()):
+                stack.append((item.child(k), depth + 1))
+        if not widest:
+            return  # 列表为空：保持当前列宽，避免抖动
+        # 面板可能过窄，给一个下限宽度保证「信号」列可用（备注列仍可滚动查看）
+        avail = max(tree.viewport().width(), dp(240))
+        tree.setColumnWidth(0, min(max(widest, dp(120)), int(avail * 0.6)))
+
+    def resizeEvent(self, event):
+        """面板宽度变化时重算信号列宽（列宽上限取决于视口宽度）。"""
+        super().resizeEvent(event)
+        self._autosize_signal_column()
 
     def _match_sig(self, sig_ref: SignalRef, text: str) -> bool:
         """按信号名 / 报文名 / 帧 ID / 备注内容匹配（不区分大小写）。"""
@@ -380,6 +437,9 @@ class SignalGroupPanel(QWidget):
         if matched:
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             item.setCheckState(0, Qt.Unchecked)
+            # 信号列宽有限，超长文本尾部会被截断；悬停可看完整「信号名 + 报文 · 帧ID」
+            item.setToolTip(0, "%s\n所属报文: %s  ·  %s" % (
+                sig_ref.sig_name, sig_ref.msg_name, sig_ref.frame_id))
         else:
             # 置灰不可勾选
             item.setFlags(

@@ -20,11 +20,13 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QSpinBox, QCheckBox,
     QLineEdit, QHeaderView, QComboBox, QTreeWidget, QTreeWidgetItem,
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
 import can
 import re
+import threading
+import time
 
 from core.can_utils import (
     load_dbc, DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE,
@@ -32,6 +34,7 @@ from core.can_utils import (
 from core.can_connection import CanConnectionManager
 from widgets.del_key_filter import DelKeyFilter
 from core.can_data import MessageDef, SignalDef
+from utils.ui_scale import dp
 
 
 # 列索引（分组树：顶层=报文组，子层=信号）
@@ -44,6 +47,162 @@ COL_STATUS = 5     # 状态 / 组状态
 COL_DETAIL = 6     # 详情 / —
 COL_ACTION = 7     # 操作（信号：移除 / 组：发送·停止）
 NUM_COLS = 8
+
+
+def _signal_range(sig) -> tuple[int, int]:
+    """返回该信号原始值的可表示范围 [lo, hi]（根据位宽与符号位）。"""
+    length = getattr(sig, "length", 64) or 64
+    if getattr(sig, "is_signed", False):
+        return -(2 ** (length - 1)), 2 ** (length - 1) - 1
+    return 0, 2 ** length - 1
+
+
+def _encode_sim_frame(dbc, frame_id: int, values: dict):
+    """按报文 ID 编码一帧，返回 (data, raw_signals)；异常由调用方处理。
+
+    cantools 的 msg.encode() 要求提供报文中【全部】信号，否则对缺失信号直接
+    抛 KeyError。本工具常只模拟上报一帧中的部分信号，因此先以各信号可表示
+    范围的安全默认值填满整帧，再用 values 覆盖（负 offset 钳制到下限，避免
+    无符号信号被负默认值填满）。
+
+    values 形如 {(msg_name, sig_name): raw}。
+    """
+    msg = dbc.get_message_by_frame_id(frame_id)
+    raw_signals = {}
+    for s in msg.signals:
+        lo, hi = _signal_range(s)
+        dflt = int(s.offset) if s.offset else 0
+        if dflt < lo:
+            dflt = lo
+        elif dflt > hi:
+            dflt = hi
+        raw_signals[s.name] = dflt
+    for key, raw in values.items():
+        raw_signals[key[1]] = raw
+    data = msg.encode(raw_signals, scaling=False, strict=False)
+    return data, raw_signals
+
+
+class _SimSendWorker(QThread):
+    """模拟上报发送线程：按各报文组周期编码并发送，不依赖主线程事件循环。
+
+    为什么需要独立线程：主线程 QTimer 在 Windows 拖动 / 缩放窗口（系统进入
+    modal move/size loop）期间不再派发 timeout，导致模拟上报暂停、松手后才
+    继续。把周期发送移入本线程后与主线程事件循环解耦，拖窗口时持续上报。
+
+    线程安全说明：
+    - 值快照 _values 与组状态 _groups 均由 _lock 保护，主线程写、本线程读；
+    - 复用 CanConnectionManager 持有的共享总线（PEAK 同一物理通道同进程只能
+      Initialize 一次，不能另开 bus）。该总线已被收帧线程 recv、主线程 send
+      同时使用，本线程仅追加一个发送方，不引入新的访问类型；
+    - dispatch() 会同步回调各监听者，而监听者均为 worker 对象（内部用锁 +
+      信号回主线程），与收帧线程的既有调用方式一致。
+    """
+
+    sent = pyqtSignal(int, str)    # (frame_id, data_hex)
+    error = pyqtSignal(int, str)   # (frame_id, 错误文本)
+
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+        self._manager = manager
+        self._dbc = None
+        self._lock = threading.Lock()
+        self._values = {}   # {(msg_name, sig_name): raw}
+        self._groups = {}   # {frame_id: {"keys": [...], "cycle": 秒, "enabled": bool}}
+        self._running = False
+
+    # ── 以下由主线程调用，更新共享状态（锁保护） ──
+
+    def set_dbc(self, dbc):
+        with self._lock:
+            self._dbc = dbc
+
+    def set_values(self, values: dict):
+        with self._lock:
+            self._values = dict(values)
+
+    def set_group(self, frame_id: int, keys: list, cycle_ms: int, enabled: bool):
+        with self._lock:
+            self._groups[frame_id] = {
+                "keys": list(keys),
+                "cycle": max(int(cycle_ms), 10) / 1000.0,
+                "enabled": enabled,
+            }
+
+    def set_group_enabled(self, frame_id: int, enabled: bool):
+        with self._lock:
+            g = self._groups.get(frame_id)
+            if g is not None:
+                g["enabled"] = enabled
+
+    def remove_group(self, frame_id: int):
+        with self._lock:
+            self._groups.pop(frame_id, None)
+
+    def stop(self):
+        self._running = False
+
+    # ── 线程主体 ──
+
+    def prepare(self):
+        """启动前复位运行标志（主线程在 start() 之前调用）。
+
+        注意：不能在 run() 开头设置该标志——那会与「启动后立即 stop()」形成
+        竞态：主线程先置 False，线程随后又置 True，导致线程永不停下，进程退出
+        时 QThread 被销毁而崩溃（且 stop() 形同失效）。
+        """
+        self._running = True
+
+    def run(self):
+        next_due = {}   # {frame_id: 下次到期时刻(time.monotonic)}
+        try:
+            while self._running:
+                now = time.monotonic()
+                with self._lock:
+                    dbc = self._dbc
+                    values = dict(self._values)
+                    active = {fid: (list(g["keys"]), g["cycle"])
+                              for fid, g in self._groups.items() if g["enabled"]}
+                wait = 0.05
+                for fid, (keys, cycle) in active.items():
+                    due = next_due.get(fid, 0.0)
+                    if now >= due:
+                        self._send_one(dbc, fid, keys, values)
+                        next_due[fid] = now + cycle
+                    else:
+                        wait = min(wait, max(0.001, due - now))
+                # 睡眠上限 50ms：既由 next_due 保证各周期精度（最小 10ms），
+                # 也让 stop() 能在短时间内被响应退出。
+                time.sleep(min(wait, 0.05))
+        except Exception as e:  # noqa: BLE001
+            # 线程内未捕获异常会逃逸出 QThread.run() 并直接终止整个进程，
+            # 这里必须兜底：上报错误并让线程干净退出。
+            self.error.emit(-1, f"发送线程异常: {e}")
+        finally:
+            self._running = False
+
+    def _send_one(self, dbc, frame_id: int, keys: list, values: dict):
+        """线程内编码并发送一帧（值取自快照，不访问任何 Qt 控件）。"""
+        if dbc is None or self._manager is None:
+            return
+        try:
+            bus = self._manager.get_bus()
+            if bus is None:
+                return
+            frame_values = {k: values[k] for k in keys if k in values}
+            data, _raw = _encode_sim_frame(dbc, frame_id, frame_values)
+            frame = can.Message(
+                arbitration_id=frame_id,
+                data=data,
+                is_extended_id=frame_id > 0x7FF,
+            )
+            bus.send(frame)
+            # 发送侧主动 fan-out：PCAN 不回环自身发出的帧，收帧线程收不到，
+            # 故在此投递，保证自己模拟的信号也能在监控页/报文页实时显示。
+            self._manager.dispatch(frame)
+            self.sent.emit(frame_id, " ".join(f"{b:02X}" for b in data))
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(frame_id, str(e))
 
 
 class SignalSimWidget(QWidget):
@@ -80,11 +239,16 @@ class SignalSimWidget(QWidget):
         # 发送日志：frame_id -> 行号 / frame_id -> 已发送计数
         self._log_rows: dict = {}
         self._log_counts: dict = {}
+        # 周期发送线程（懒创建）：把发送与主线程事件循环解耦，避免拖动 /
+        # 切换窗口期间 modal move loop 阻塞主线程 QTimer 导致上报暂停。
+        self._worker: _SimSendWorker | None = None
+        # 最近一次值收集结果（发送出错时用于反推非法信号）
+        self._last_values: dict = {}
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -92,7 +256,7 @@ class SignalSimWidget(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_layout.setSpacing(dp(5))
         left_layout.addWidget(QLabel("已选信号（可删除）:"))
         self._sel_list = QListWidget()
         self._sel_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -115,10 +279,10 @@ class SignalSimWidget(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
+        right_layout.setSpacing(dp(5))
 
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(8)
+        ctrl.setSpacing(dp(6))
         self._status_label = QLabel("未连接")
         self._status_label.setStyleSheet("color: #9090a0;")
         ctrl.addWidget(self._status_label)
@@ -145,12 +309,12 @@ class SignalSimWidget(QWidget):
         hdr.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(COL_DETAIL, QHeaderView.Stretch)
         hdr.setSectionResizeMode(COL_ACTION, QHeaderView.Fixed)
-        self._value_table.setColumnWidth(COL_SIG, 240)
-        self._value_table.setColumnWidth(COL_VALUE, 175)
+        self._value_table.setColumnWidth(COL_SIG, dp(200))
+        self._value_table.setColumnWidth(COL_VALUE, dp(150))
         # 组行的「所有信号」勾选框也放在该列，宽度需容得下四字 + 指示器
-        self._value_table.setColumnWidth(COL_MANUAL, 110)
+        self._value_table.setColumnWidth(COL_MANUAL, dp(100))
         self._value_table.setColumnWidth(COL_DETAIL, 160)
-        self._value_table.setColumnWidth(COL_ACTION, 90)
+        self._value_table.setColumnWidth(COL_ACTION, dp(80))
         self._value_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._value_table.setAlternatingRowColors(True)
         # 行高：setItemWidget 放入的控件高度 = 行高 - 上下 padding。
@@ -166,9 +330,9 @@ class SignalSimWidget(QWidget):
         self._log_list = QTableWidget()
         self._log_list.setColumnCount(3)
         self._log_list.setHorizontalHeaderLabels(["ID", "Data", "发送计数"])
-        self._log_list.setColumnWidth(0, 100)
-        self._log_list.setColumnWidth(1, 300)
-        self._log_list.setColumnWidth(2, 80)
+        self._log_list.setColumnWidth(0, dp(90))
+        self._log_list.setColumnWidth(1, dp(260))
+        self._log_list.setColumnWidth(2, dp(72))
         self._log_list.setAlternatingRowColors(True)
         right_layout.addWidget(self._log_list, stretch=1)
 
@@ -340,7 +504,7 @@ class SignalSimWidget(QWidget):
                 grp_status = QTreeWidgetItem(grp_item)
                 grp_status.setText(COL_STATUS, "停止")
                 grp_btn = QPushButton("发送")
-                grp_btn.setFixedHeight(22)
+                grp_btn.setFixedHeight(dp(20))
                 grp_btn.setStyleSheet(
                     "QPushButton{padding:1px 4px;font-size:11px;}"
                 )
@@ -387,6 +551,11 @@ class SignalSimWidget(QWidget):
 
             manual_edit = QLineEdit()
             manual_edit.setPlaceholderText("手动原始值(支持0x)")
+            # 手动值编辑完成后刷新发送线程的值快照。拖动窗口期间用户不会改值，
+            # 快照保持不动，发送线程据此持续上报（这正是本次修复的关键）。
+            manual_edit.editingFinished.connect(
+                lambda: self._sync_values_to_worker(mark_errors=True)
+            )
             self._value_table.setItemWidget(row, COL_MANUAL, manual_edit)
 
             ramp_chk = QCheckBox()
@@ -394,8 +563,8 @@ class SignalSimWidget(QWidget):
             self._value_table.setItemWidget(row, COL_RAMP, ramp_chk)
 
             remove_btn = QPushButton("移除")
-            remove_btn.setFixedHeight(22)
-            remove_btn.setMaximumWidth(60)
+            remove_btn.setFixedHeight(dp(20))
+            remove_btn.setMaximumWidth(dp(56))
             remove_btn.setStyleSheet(
                 "QPushButton{padding:1px 4px;font-size:11px;}"
             )
@@ -468,6 +637,11 @@ class SignalSimWidget(QWidget):
         grp = self._groups.get(frame_id)
         if grp is not None:
             grp["cycle"] = grp["cycle_spin"].value()
+            if self._worker is not None:
+                # enabled 传当前发送状态：仅更新周期，不改变启停
+                self._worker.set_group(
+                    frame_id, grp["keys"], grp["cycle"], grp["sending"]
+                )
 
     def _refresh_sel_list(self):
         self._sel_list.blockSignals(True)
@@ -491,10 +665,9 @@ class SignalSimWidget(QWidget):
                 chk.blockSignals(True)
             except RuntimeError:  # 控件已被 Qt 释放
                 pass
-        if grp["timer"] is not None:
-            grp["timer"].stop()
-            grp["timer"].deleteLater()
-            grp["timer"] = None
+        # 通知发送线程移除该组（周期发送已不依赖主线程 QTimer）
+        if self._worker is not None:
+            self._worker.remove_group(frame_id)
         grp["sending"] = False
         for k in list(grp["keys"]):
             self._row_data.pop(k, None)
@@ -552,12 +725,16 @@ class SignalSimWidget(QWidget):
     # ────────────────────── 值解析与发送 ──────────────────────
 
     def _on_value_mode_changed(self, key: tuple):
-        """下拉框在「枚举 / 手动模拟」间切换时，启用/禁用手动值输入框。"""
+        """下拉框在「枚举 / 手动模拟」间切换时，启用/禁用手动值输入框。
+
+        切换会改变该行取值来源，故随后刷新发送线程的值快照。
+        """
         rd = self._row_data.get(key)
         if rd is None:
             return
         is_manual = rd["value_combo"].currentData() == "__manual__"
         rd["manual_edit"].setEnabled(is_manual)
+        self._sync_values_to_worker()
 
     def _choices_of(self, key: tuple) -> dict:
         """解析该信号的模拟值下拉项（raw 值 -> 描述），按优先级合并来源：
@@ -631,16 +808,98 @@ class SignalSimWidget(QWidget):
         self._bus = bus
         return True
 
+    # ────────────────────── 发送线程管理 ──────────────────────
+
+    def _ensure_worker(self) -> _SimSendWorker:
+        """确保发送线程已创建并运行（懒创建）。"""
+        if self._worker is None:
+            self._worker = _SimSendWorker(self._manager, self)
+            self._worker.sent.connect(self._on_frame_sent)
+            self._worker.error.connect(self._on_send_error)
+        if not self._worker.isRunning():
+            self._worker.set_dbc(self._dbc)
+            self._worker.prepare()
+            self._worker.start()
+        return self._worker
+
+    def _stop_worker(self):
+        """停止发送线程并等待其退出（避免析构时线程仍在运行）。"""
+        if self._worker is not None:
+            self._worker.stop()
+            self._worker.wait(2000)
+
+    def _collect_values(self, mark_errors: bool = True) -> dict:
+        """收集所有信号行的当前原始值快照（主线程；发送线程据此编码发送）。
+
+        沿用原发送路径的范围检查：超范围时钳制进 [lo, hi] 并在详情列标红，
+        保证整帧仍可编码；解析失败的行跳过（不进入快照）。
+
+        mark_errors=False 时只取快照、不改动行的状态 / 详情列——用于「值控件
+        变化」触发的被动同步：此刻不能把尚未填值的行标红，否则会覆盖掉报文组
+        发送中应有的「发送中」状态（见 test_signal_sim_addsends）。
+        """
+        snap = {}
+        if self._dbc is None:
+            return snap
+        for key, rd in self._row_data.items():
+            detail = rd["detail_item"]
+            status = rd["status_item"]
+            ok, raw, err = self._resolve_raw(key)
+            if not ok:
+                if mark_errors:
+                    detail.setText(COL_DETAIL, err)
+                    detail.setForeground(COL_DETAIL, QColor("#FF4444"))
+                    status.setText(COL_STATUS, "错误")
+                    status.setForeground(COL_STATUS, QColor("#FF4444"))
+                continue
+            try:
+                msg = self._dbc.get_message_by_frame_id(rd["frame_id"])
+                sig = msg.get_signal_by_name(key[1])
+                lo, hi = _signal_range(sig)
+            except Exception:  # noqa: BLE001
+                lo, hi = 0, 2 ** 64 - 1
+            if not (lo <= raw <= hi):
+                if mark_errors:
+                    detail.setText(
+                        COL_DETAIL, f"值 {raw} 超出可表示范围[{lo},{hi}]"
+                    )
+                    detail.setForeground(COL_DETAIL, QColor("#FF4444"))
+                    status.setText(COL_STATUS, "错误")
+                    status.setForeground(COL_STATUS, QColor("#FF4444"))
+                raw = max(lo, min(raw, hi))
+            elif mark_errors:
+                detail.setText(COL_DETAIL, "")
+                detail.setForeground(COL_DETAIL, QColor("#000000"))
+            snap[key] = raw
+        return snap
+
+    def _sync_values_to_worker(self, mark_errors: bool = False):
+        """把当前值快照推送到发送线程（值控件变化 / 启动发送时调用）。
+
+        拖动窗口期间用户不会改动取值，快照保持不变，发送线程据此持续上报——
+        这正是「拖窗口时上报不再暂停」的关键。
+
+        mark_errors 默认 False：由添加信号 / 切换取值方式被动触发的同步不去
+        改动行的状态列，避免覆盖报文组发送中应有的「发送中」显示。
+        """
+        if self._worker is None:
+            return
+        self._worker.set_dbc(self._dbc)
+        snap = self._collect_values(mark_errors=mark_errors)
+        self._last_values = snap
+        self._worker.set_values(snap)
+
     @staticmethod
     def _signal_range(sig) -> tuple[int, int]:
-        """返回该信号原始值的可表示范围 [lo, hi]（根据位宽与符号位）。"""
-        length = getattr(sig, "length", 64) or 64
-        if getattr(sig, "is_signed", False):
-            return -(2 ** (length - 1)), 2 ** (length - 1) - 1
-        return 0, 2 ** length - 1
+        """返回该信号原始值的可表示范围 [lo, hi]（实现见模块级同名函数）。"""
+        return _signal_range(sig)
 
     def _send_frame(self, frame_id: int, keys: list):
-        """编码并发送一帧（同一 CAN ID 的信号聚合）。
+        """同步发送一帧（同一 CAN ID 的信号聚合）。
+
+        注意：周期性模拟上报【不】走这里——由 _SimSendWorker 线程驱动，避免
+        主线程事件循环被窗口拖动 / 切换阻塞时中断上报。本方法保留「同步发送
+        一次」的能力，供单元测试与手动触发使用。
 
         关键修复（修复「点 A 却报 B 发送失败」的元凶）：
         cantools 的 msg.encode() 要求提供报文中【全部】信号，否则对缺失的
@@ -659,17 +918,8 @@ class SignalSimWidget(QWidget):
             msg = self._dbc.get_message_by_frame_id(frame_id)
         except Exception:  # noqa: BLE001
             return
-        # 1) 先以各信号的可表示范围安全默认值填满整帧（负 offset 钳制为下限）
-        raw_signals = {}
-        for s in msg.signals:
-            lo, hi = self._signal_range(s)
-            dflt = int(s.offset) if s.offset else 0
-            if dflt < lo:
-                dflt = lo
-            elif dflt > hi:
-                dflt = hi
-            raw_signals[s.name] = dflt
-        # 2) 用已选信号的原始值覆盖（越界/负值做友好报错并钳制，保证整帧可编码）
+        # 1) 解析已选信号的原始值（越界/负值做友好报错并钳制，保证整帧可编码）
+        values = {}
         for key in keys:
             ok, raw, err = self._resolve_raw(key)
             detail = self._row_data[key]["detail_item"]
@@ -695,9 +945,10 @@ class SignalSimWidget(QWidget):
             else:
                 detail.setText(COL_DETAIL, "")
                 detail.setForeground(COL_DETAIL, QColor("#000000"))
-            raw_signals[sig_name] = raw
+            values[key] = raw
+        # 2) 编码（安全默认值填满整帧 + values 覆盖）并发送
         try:
-            data = msg.encode(raw_signals, scaling=False, strict=False)
+            data, _raw = _encode_sim_frame(self._dbc, frame_id, values)
             frame = can.Message(
                 arbitration_id=frame_id,
                 data=data,
@@ -713,7 +964,9 @@ class SignalSimWidget(QWidget):
         except Exception as e:  # noqa: BLE001
             self._status_label.setText(f"发送失败: {e}")
             # 把错误精确定位到具体信号行，避免误导用户
-            self._mark_encode_error(str(e), keys, msg, raw_signals)
+            self._mark_encode_error(
+                str(e), keys, msg, {k[1]: v for k, v in values.items()}
+            )
 
     def _mark_encode_error(self, err_msg: str, keys: list,
                            msg=None, raw_signals: dict | None = None):
@@ -850,6 +1103,7 @@ class SignalSimWidget(QWidget):
     def _stop_all(self):
         for fid in list(self._groups.keys()):
             self._stop_group(fid)
+        self._stop_worker()
         self._refresh_send_button()
         self._status_label.setText("已停止")
 
@@ -866,18 +1120,21 @@ class SignalSimWidget(QWidget):
             self._start_group(frame_id)
 
     def _start_group(self, frame_id: int):
-        """启动单个报文组的周期发送：组内所有信号填入同一帧一次性编码发送。"""
+        """启动单个报文组的周期发送：组内所有信号填入同一帧一次性编码发送。
+
+        周期触发由独立线程 _SimSendWorker 承担（不依赖主线程事件循环），因此
+        拖动窗口 / 切换窗口期间不会中断上报。
+        """
         if not self._ensure_bus():
             return
         grp = self._groups.get(frame_id)
         if grp is None or grp["sending"]:
             return
+        worker = self._ensure_worker()
         grp["sending"] = True
-        if grp["timer"] is None:
-            timer = QTimer(self)
-            timer.timeout.connect(lambda f=frame_id: self._tick_group(f))
-            grp["timer"] = timer
-        grp["timer"].start(grp["cycle"])
+        # 启动前刷新值快照（并标红取值有误的行），保证发送线程拿到最新取值
+        self._sync_values_to_worker(mark_errors=True)
+        worker.set_group(frame_id, grp["keys"], grp["cycle"], True)
         grp["status_item"].setText(COL_STATUS, "发送中")
         grp["status_item"].setForeground(COL_STATUS, QColor("#44CC44"))
         grp["send_btn"].setText("停止")
@@ -898,8 +1155,8 @@ class SignalSimWidget(QWidget):
         if grp is None:
             return
         grp["sending"] = False
-        if grp["timer"] is not None:
-            grp["timer"].stop()
+        if self._worker is not None:
+            self._worker.set_group_enabled(frame_id, False)
         grp["status_item"].setText(COL_STATUS, "停止")
         grp["status_item"].setForeground(COL_STATUS, QColor("#888888"))
         grp["send_btn"].setText("发送")
@@ -912,6 +1169,9 @@ class SignalSimWidget(QWidget):
         # 「无发送」时释放本地总线引用并复位按钮文案）
         self._refresh_send_button()
         if not any(g["sending"] for g in self._groups.values()):
+            # 所有组都已停止：顺带停掉发送线程——既避免线程无任务空转，也避免
+            # 进程退出时 QThread 仍在运行被销毁而崩溃。
+            self._stop_worker()
             self._status_label.setText("已停止")
 
     # ────────────────────── 说明 ──────────────────────
@@ -928,6 +1188,25 @@ class SignalSimWidget(QWidget):
     def _on_error(self, text: str):
         QMessageBox.critical(self, "模拟上报错误", text)
         self._stop_all()
+
+    def _on_send_error(self, frame_id: int, err_msg: str):
+        """发送线程编码 / 发送失败回调（经信号切回主线程执行）。
+
+        仅标注该报文组的信号行，不弹窗、不中断上报——避免总线瞬时异常把整轮
+        模拟打断；错误详情通过状态栏与行内标红呈现。
+        """
+        grp = self._groups.get(frame_id)
+        keys = list(grp["keys"]) if grp is not None else []
+        msg = None
+        if self._dbc is not None:
+            try:
+                msg = self._dbc.get_message_by_frame_id(frame_id)
+            except Exception:  # noqa: BLE001
+                msg = None
+        # _last_values 形如 {(msg_name, sig_name): raw}，转成 {sig_name: raw}
+        raw_map = {k[1]: v for k, v in self._last_values.items()}
+        self._mark_encode_error(err_msg, keys, msg, raw_map)
+        self._status_label.setText(f"发送失败: {err_msg}")
 
     def _on_frame_sent(self, frame_id: int, data_hex: str):
         """记录一次成功发送。同一报文（frame_id）在日志中只占一行：

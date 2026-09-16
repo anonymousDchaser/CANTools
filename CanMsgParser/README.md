@@ -5,6 +5,8 @@
 
 ## 版本说明
 
+- **v1.1.1**：跨平台适配（macOS 可编译、中文字体按平台自动选择）、打包脚本
+  按平台自动切换参数。详见「macOS 环境搭建与编译」。
 - **v1.1.0**：信号分组与信号检索视图拆分独立、跨分组搜索与勾选框交互重构。
 
 ## 界面布局（停靠视图）
@@ -86,6 +88,11 @@
 PyQt5 matplotlib cantools python-can pandas numpy openpyxl xlrd lxml uptime
 ```
 
+- 完整清单见 `requirements.txt`（其中 `pytest` 仅用于开发自测、`pyinstaller`
+  仅用于打包，**运行时不需要**）。
+- **Python 版本**：推荐 **3.11 / 3.12**。PyQt5 5.15.11（当前最新版）官方支持到
+  Python 3.12，更高版本虽可能装上但属未验证组合，不建议用于打包。
+
 ## 运行
 
 ```bash
@@ -98,6 +105,127 @@ python main.py
 python build.py
 ```
 
-产物：`dist/CanMsgParser/CanMsgParser.exe`（无控制台窗口，onedir 模式）。
+`build.py` 会自动按当前平台选择参数，产物路径如下：
+
+| 平台 | 产物 |
+| --- | --- |
+| Windows | `dist/CanMsgParser/CanMsgParser.exe`（无控制台窗口，onedir 模式） |
+| macOS | `dist/CanMsgParser.app`（双击运行，或 `open dist/CanMsgParser.app`） |
+| Linux | `dist/CanMsgParser/CanMsgParser` |
+
 `build.py` 会将上一版 `dist/`、`build/`、`.spec` 改名移入 `.build_trash/`（已被
 `.gitignore` 忽略），不再保留编译产物备份。
+
+> **跨平台说明**：原先字体只写了 Windows 字体，macOS 下曲线图中文会显示为方框
+> （回落到不含中文字形的 DejaVu Sans）。现统一由 `utils/font_helper.py` 按平台
+> 给出字体候选——Windows 用 Microsoft YaHei、macOS 用 PingFang SC、Linux 用
+> Noto Sans CJK SC，三者互为兜底，`build.py` 的 Windows 专属参数
+> （`--manifest` / `--noconsole`）也已在非 Windows 平台跳过。
+
+## macOS 环境搭建与编译
+
+> 适用：macOS 12+，Intel(x86_64) 与 Apple Silicon(arm64) 均可。
+
+### 1. 确认架构与 Python 版本
+
+```bash
+uname -m            # arm64 = Apple Silicon；x86_64 = Intel
+python3 --version
+```
+
+- 推荐 **Python 3.11 或 3.12**（PyQt5 5.15.11 官方支持到 3.12）。
+- Apple Silicon 请务必使用**原生 arm64** Python。若 `uname -m` 输出 `arm64`
+  而 Python 是 x86_64（Rosetta），PyQt5 与打包产物都会以转译模式运行，性能差
+  且产物只能在该模式下启动。
+
+用 pyenv 安装（推荐，便于锁定版本）：
+
+```bash
+brew install pyenv
+pyenv install 3.12.6
+pyenv local 3.12.6          # 在本项目目录下固定版本
+```
+
+也可直接用 Homebrew 的 Python：`brew install python@3.12`。
+
+### 2. 创建虚拟环境并安装依赖
+
+```bash
+cd CanMsgParser
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+依赖均为跨平台包，无需额外编译工具链。两个可能卡住的点：
+
+- `xlrd==1.2.0` 在 PyPI 上只提供源码包（无 wheel），安装时需要本地构建。
+  若报错，先升级构建工具再重试：
+
+  ```bash
+  pip install --upgrade setuptools wheel
+  pip install -r requirements.txt
+  ```
+
+- `PyQt5` 装不上，绝大多数情况是 Python 版本过高。请确认 Python ≤ 3.12
+  （PyQt5 5.15.11 的官方支持上限）。
+
+### 3. 以源码方式运行
+
+```bash
+python main.py
+```
+
+### 4. 编译为 .app
+
+```bash
+python build.py
+```
+
+产物为 `dist/CanMsgParser.app`：
+
+```bash
+open dist/CanMsgParser.app
+```
+
+### 5. macOS 常见问题
+
+**Q1. 提示「无法打开，因为它来自身份不明的开发者」**
+
+这是 Gatekeeper 对未签名 app 的拦截，与程序本身无关。二选一：
+
+- 在访达中**右键**点击 `CanMsgParser.app` →「打开」，在弹窗中确认（只需一次）；
+- 或清除隔离属性：
+
+  ```bash
+  xattr -cr dist/CanMsgParser.app
+  ```
+
+如需在本机长期免去该提示，可做 ad-hoc 自签名（仍非公证，分发给他人仍会被拦截）：
+
+```bash
+codesign --force --deep --sign - dist/CanMsgParser.app
+```
+
+**Q2. 曲线图 / 界面中文显示为方框**
+
+字体已由 `utils/font_helper.py` 自动适配（macOS 首选 PingFang SC）。若仍显示
+方框，通常是 matplotlib 字体缓存未刷新：
+
+```bash
+python -c "import matplotlib; print(matplotlib.get_cachedir())"   # 查看缓存目录
+rm -rf <上面输出的目录>
+```
+
+**Q3. 连不上 CAN 设备 / 找不到 PCAN、Vector**
+
+`python-can` 的 PCAN、Vector 等后端在 macOS 上没有官方驱动（SocketCAN 为 Linux
+专有）。因此 **macOS 版适合离线分析**——加载 DBC、回放 BLF/ASC 日志、查看信号
+曲线与位图、导出数据等功能均正常；**实时收发报文**（连接硬件、模拟上报）在
+macOS 上不可用，除非设备厂商提供 macOS 驱动。
+
+**Q4. 执行 `python` 提示 command not found**
+
+macOS 自带的命令是 `python3`。请确认已激活虚拟环境
+（`source .venv/bin/activate`），激活后 `python` 即指向 venv 内的解释器。

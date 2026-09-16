@@ -26,6 +26,10 @@ class _FakeManager:
     def ensure_connected(self, *a):
         return self._bus, None
 
+    def get_bus(self):
+        # 与真实 CanConnectionManager.get_bus 对齐：发送线程按周期取共享总线
+        return self._bus
+
     def dispatch(self, msg):
         pass
 

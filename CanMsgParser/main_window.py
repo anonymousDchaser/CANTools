@@ -33,6 +33,8 @@ from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
 from utils.excel_value_loader import load_signal_value_db, load_value_descriptions
+from utils.font_helper import UI_FONT_FAMILY
+from utils.ui_scale import dp, scale_qss
 
 # 配置文件路径，用于记住上次加载的 DBC 文件
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".canmsgparser_config.json")
@@ -42,12 +44,13 @@ class MainWindow(QMainWindow):
     """CAN 报文分析工具主窗口"""
 
     # ─── 全局暗色主题样式表（与 main.py 设计系统一致） ───
-    _GLOBAL_QSS = """
+    # 尺寸按 1920x1080 设计基准给出，统一交给 scale_qss 等比缩放。
+    _GLOBAL_QSS = scale_qss("""
         /* ── 主窗口 ── */
         QMainWindow {
             background-color: #1e1e2e;
             color: #e0e0e0;
-            font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            font-family: %s;
         }
 
         /* ── 菜单栏 ── */
@@ -59,7 +62,7 @@ class MainWindow(QMainWindow):
             font-size: 13px;
         }
         QMenuBar::item {
-            padding: 6px 14px;
+            padding: 4px 10px;
             margin: 2px 1px;
             border-radius: 4px;
         }
@@ -109,7 +112,7 @@ class MainWindow(QMainWindow):
         QTabBar::tab {
             background-color: #252535;
             color: #9090a0;
-            padding: 8px 10px;
+            padding: 6px 8px;
             border: 1px solid #3a3a4e;
             border-bottom: none;
             margin-right: 2px;
@@ -117,8 +120,10 @@ class MainWindow(QMainWindow):
             font-size: 13px;
             /* Qt 按「文字宽度 + padding」精确裁剪页签，实测仅余 2px 余量，
                emoji 走字体回退时实际渲染更宽，四/五字页签末字就被切掉。
-               这里用 min-width 兜出富余宽度（最长的「🔢 位图查看器」约 119px），
-               8 个页签合计约 1248px，仍小于主窗口最小宽度 1280px。 */
+               这里用 min-width 兜出富余宽度（最长的「🔢 位图查看器」约 119px，
+               min-width 与字号同比例缩放，任一缩放档位下都留得住富余）；
+               窗口最小宽度改为按屏幕自适应后，极窄窗口下 8 个页签放不下时，
+               Qt 会自动切换成左右滚动箭头（默认 usesScrollButtons=True）。 */
             min-width: 132px;
         }
         QTabBar::tab:selected {
@@ -140,13 +145,13 @@ class MainWindow(QMainWindow):
         QDockWidget::title {
             background-color: #252535;
             color: #e0e0e0;
-            padding: 6px 10px;
+            padding: 4px 8px;
             border-bottom: 1px solid #3a3a4e;
         }
         QDockWidget::close-button, QDockWidget::float-button {
             background-color: #252535;
             border: none;
-            icon-size: 14px;
+            icon-size: 13px;
         }
         QDockWidget::close-button:hover, QDockWidget::float-button:hover {
             background-color: #3a3a4e;
@@ -175,7 +180,7 @@ class MainWindow(QMainWindow):
             background-color: #252535;
             color: #e0e0e0;
             font-size: 11px;
-            min-height: 18px;
+            min-height: 14px;
         }
         QProgressBar::chunk {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4fc3f7, stop:1 #29b6f6);
@@ -223,7 +228,7 @@ class MainWindow(QMainWindow):
             background-color: #252535;
             color: #e0e0e0;
             border: 1px solid #4fc3f7;
-            padding: 6px 10px;
+            padding: 4px 8px;
             border-radius: 4px;
             font-size: 12px;
         }
@@ -234,7 +239,7 @@ class MainWindow(QMainWindow):
             color: #e0e0e0;
             border: 1px solid #3a3a4e;
             border-radius: 4px;
-            padding: 6px 10px;
+            padding: 4px 8px;
             font-size: 13px;
             selection-background-color: #1e3a5a;
         }
@@ -249,12 +254,12 @@ class MainWindow(QMainWindow):
         QCheckBox {
             background-color: transparent;
             color: #e0e0e0;
-            spacing: 6px;
+            spacing: 5px;
             font-size: 13px;
         }
         QCheckBox::indicator {
-            width: 16px;
-            height: 16px;
+            width: 14px;
+            height: 14px;
             border: 1px solid #4a4a5e;
             border-radius: 3px;
             background-color: #2a2a3e;
@@ -273,8 +278,8 @@ class MainWindow(QMainWindow):
             color: #e0e0e0;
             border: 1px solid #4a4a5e;
             border-radius: 4px;
-            padding: 6px 14px;
-            min-height: 28px;
+            padding: 4px 10px;
+            min-height: 24px;
             font-size: 13px;
             font-weight: 500;
         }
@@ -304,6 +309,11 @@ class MainWindow(QMainWindow):
         QPushButton[class="primary"]:pressed {
             background-color: #0288d1;
         }
+        QPushButton[class="compact"] {
+            padding: 2px 8px;
+            min-height: 20px;
+            font-size: 12px;
+        }
 
         /* ── 树形控件 ── */
         QTreeWidget {
@@ -316,7 +326,7 @@ class MainWindow(QMainWindow):
             font-size: 13px;
         }
         QTreeWidget::item {
-            padding: 4px 6px;
+            padding: 2px 5px;
         }
         QTreeWidget::item:selected {
             background-color: #1e3a5a;
@@ -331,7 +341,7 @@ class MainWindow(QMainWindow):
             border: none;
             border-right: 1px solid #3a3a4e;
             border-bottom: 2px solid #4fc3f7;
-            padding: 6px 8px;
+            padding: 4px 6px;
             font-weight: bold;
             font-size: 12px;
         }
@@ -346,23 +356,36 @@ class MainWindow(QMainWindow):
         QMessageBox QLabel {
             color: #e0e0e0;
         }
-    """
+    """ % UI_FONT_FAMILY)
 
     def __init__(self):
         super().__init__()
         # 进程内共享的 CAN 连接管理器：模拟上报/实时监控/实时报文三页共用
         self._conn_manager = CanConnectionManager(self)
         self.setWindowTitle("CAN 报文分析工具 v1.1.0")
-        self.setMinimumSize(1280, 720)
-        self.resize(1920, 1280)
+
+        # ── 窗口尺寸自适应可用屏幕 ──
+        # 原实现固定 1920x1280：在 1080p 及以下屏幕上超出屏幕被系统裁切，最小
+        # 尺寸 1280x720 在 1366x768 这类小屏上又几乎等于整屏。改为按可用区域
+        # 取比例，并保证最小尺寸不超过屏幕（给任务栏与窗口边框留余量）。
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        if avail is not None and avail.width() > 0 and avail.height() > 0:
+            def_w = min(dp(1920), int(avail.width() * 0.92))
+            def_h = min(dp(1280), int(avail.height() * 0.92))
+            min_w = min(dp(1120), max(dp(720), avail.width() - dp(160)))
+            min_h = min(dp(640), max(dp(460), avail.height() - dp(120)))
+        else:
+            def_w, def_h = dp(1920), dp(1280)
+            min_w, min_h = dp(1120), dp(640)
+        self.setMinimumSize(min_w, min_h)
+        self.resize(def_w, def_h)
 
         # 居中显示
-        screen = QApplication.primaryScreen()
-        if screen:
-            screen_geo = screen.availableGeometry()
-            x = (screen_geo.width() - 1920) // 2 + screen_geo.x()
-            y = (screen_geo.height() - 1280) // 2 + screen_geo.y()
-            self.move(max(0, x), max(0, y))
+        if avail is not None:
+            x = (avail.width() - def_w) // 2 + avail.x()
+            y = (avail.height() - def_h) // 2 + avail.y()
+            self.move(max(avail.x(), x), max(avail.y(), y))
 
         # 应用全局样式
         self.setStyleSheet(self._GLOBAL_QSS)
@@ -500,10 +523,10 @@ class MainWindow(QMainWindow):
         # ── Tab 页（唯一的顶层内容）──
         self._tabs = QTabWidget()
 
-        # ─── Tab 1: 曲线图 — 左侧信号树 + 已选信号区；右侧图表 ───
+        # ─── Tab 1: 曲线图 — 左侧已选信号区；右侧图表 ───
         chart_tab = QWidget()
         chart_layout = QHBoxLayout(chart_tab)
-        chart_layout.setContentsMargins(4, 4, 4, 4)
+        chart_layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
 
         chart_splitter = QSplitter(Qt.Horizontal)
 
@@ -511,10 +534,11 @@ class MainWindow(QMainWindow):
         left_col = QWidget()
         left_layout = QVBoxLayout(left_col)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_layout.setSpacing(dp(6))
 
-        sel_label = QLabel("已选信号（可删除，长按 ⋮⋮ 拖动排序）:")
+        sel_label = QLabel("已选信号（长按 ⋮⋮ 拖动排序）:")
         sel_label.setStyleSheet("color: #9090a0; font-weight: 500;")
+        sel_label.setToolTip("长按行右侧 ⋮⋮ 把手拖动可调整顺序；选中后按 Delete 或「移除选中」可删除")
         left_layout.addWidget(sel_label)
 
         # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧曲线图绘制顺序）
@@ -531,24 +555,30 @@ class MainWindow(QMainWindow):
         # Delete 键移除选中的已选信号（等价于「移除选中」按钮）
         self._del_filter = DelKeyFilter(self._selected_list, self._remove_selected_signals)
 
+        # 操作按钮合并为一行（原「移除选中/清空」占一行、「绘制」再占一行的写法
+        # 在窄列里白费两行高度）：移除选中 -> 清空 -> 绘制（主操作，靠右）。
         sel_btn_bar = QHBoxLayout()
+        sel_btn_bar.setSpacing(dp(4))
+
         self._remove_sel_btn = QPushButton("移除选中")
+        self._remove_sel_btn.setProperty("class", "compact")
         self._remove_sel_btn.setToolTip("从已选列表中移除（取消信号树中的勾选）")
         self._remove_sel_btn.clicked.connect(self._remove_selected_signals)
         sel_btn_bar.addWidget(self._remove_sel_btn)
 
         self._clear_sel_btn = QPushButton("清空")
+        self._clear_sel_btn.setProperty("class", "compact")
         self._clear_sel_btn.setToolTip("清空所有已选信号")
         self._clear_sel_btn.clicked.connect(self._clear_selected_signals)
         sel_btn_bar.addWidget(self._clear_sel_btn)
-        left_layout.addLayout(sel_btn_bar)
 
         # 绘制按钮：对当前已选信号重新解码并绘图
         self._plot_btn = QPushButton("绘制")
         self._plot_btn.setProperty("class", "primary")
         self._plot_btn.setToolTip("对当前已选信号重新解码并绘制曲线")
         self._plot_btn.clicked.connect(self._decode_and_plot_curve)
-        left_layout.addWidget(self._plot_btn)
+        sel_btn_bar.addWidget(self._plot_btn)
+        left_layout.addLayout(sel_btn_bar)
 
         chart_splitter.addWidget(left_col)
 
@@ -557,7 +587,7 @@ class MainWindow(QMainWindow):
         chart_splitter.addWidget(self._plot_widget)
         chart_splitter.setStretchFactor(0, 1)
         chart_splitter.setStretchFactor(1, 3)
-        chart_splitter.setSizes([320, 900])
+        chart_splitter.setSizes([dp(300), dp(900)])
 
         chart_layout.addWidget(chart_splitter)
         # ─── Tab 1: 连接状态 ───
@@ -993,7 +1023,9 @@ class MainWindow(QMainWindow):
     def _stack_docks_left(self):
         """把两个停靠窗按「信号检索在上、信号分组在下」纵向堆叠到左侧停靠区。
 
-        高度按 1:1 均分。
+        高度按 1:1 均分；横向列宽按窗口宽度约 26% 设定（夹在 300~520px 设计基准
+        值之间）。原实现不控制列宽，列宽由面板 minimumSizeHint 决定（实测分组
+        面板曾达 706px），等于白白吃掉主窗口三分之一内容宽度。
         """
         self._search_dock.setFloating(False)
         self._group_dock.setFloating(False)
@@ -1005,8 +1037,21 @@ class MainWindow(QMainWindow):
             self.resizeDocks(
                 [self._search_dock, self._group_dock], [1, 1], Qt.Vertical
             )
+            col_w = self._docked_column_width()
+            self.resizeDocks(
+                [self._search_dock, self._group_dock], [col_w, col_w], Qt.Horizontal
+            )
         except (AttributeError, TypeError):  # Qt < 5.6 兜底
             pass
+
+    def _docked_column_width(self) -> int:
+        """停靠在主窗口左侧栏时的列宽：窗口宽度的 26%，夹在 300~520px 之间。
+
+        面板内部布局已做紧凑化与响应式处理（窄列时信号检索自动改为上下堆叠），
+        因此这里可以放心把列宽压下来，给右侧内容区留出足够宽度。
+        """
+        w = int(self.width() * 0.26)
+        return max(dp(300), min(dp(520), w))
 
     def _dock_column_width(self) -> int:
         """浮动列宽：取两个面板的建议宽度上限。
@@ -1018,7 +1063,13 @@ class MainWindow(QMainWindow):
         def _need(panel) -> int:
             return max(panel.sizeHint().width(), panel.minimumSizeHint().width())
 
-        return max(_need(self._group_panel), _need(self._search_panel), 340)
+        # 上限 560：面板建议宽度可能很大（多个按钮/下拉框），浮动列不能无限撑开
+        return int(
+            min(
+                max(_need(self._group_panel), _need(self._search_panel), dp(340)),
+                dp(560),
+            )
+        )
 
     def _position_docks(self):
         """将两个停靠窗浮动到主窗口左侧外部，纵向堆叠：
@@ -1029,14 +1080,15 @@ class MainWindow(QMainWindow):
             return
         avail = screen.availableGeometry()
         col_w = self._dock_column_width()
-        x = self.x() - col_w - 12
+        gap = dp(12)
+        x = self.x() - col_w - gap
         if x < avail.x():
             # 左侧放不下整列，停靠回左侧并纵向堆叠
             self._stack_docks_left()
             return
-        total_h = max(480, int(avail.height() * 0.90))
-        gap = 12
-        gh = (total_h - gap) // 2
+        total_h = max(dp(480), int(avail.height() * 0.90))
+        # 「信号检索」是主要工作区，纵向分到 55%（原为 1:1 均分）
+        gh = (total_h - gap) * 55 // 100
         sh = total_h - gap - gh
         y = max(avail.y(), self.y())
         # 检索在上

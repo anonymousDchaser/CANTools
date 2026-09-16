@@ -21,6 +21,7 @@ from workers.can_raw_capture_worker import CanRawCaptureWorker
 from core.can_utils import load_dbc, decode_frame
 from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE)
 from core.can_connection import CanConnectionManager
+from utils.ui_scale import dp
 
 
 class RealtimeMessageWidget(QWidget):
@@ -58,12 +59,12 @@ class RealtimeMessageWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
+        layout.setSpacing(dp(5))
 
         # ─── 工具栏：清除 / 录制 / 路径 ───
         bar = QHBoxLayout()
-        bar.setSpacing(8)
+        bar.setSpacing(dp(6))
 
         self._clear_btn = QPushButton("清除")
         self._clear_btn.clicked.connect(self._on_clear)
@@ -114,12 +115,14 @@ class RealtimeMessageWidget(QWidget):
             "计数 / 信号描述",
             "最近时间(s) / 上次值",
         ])
-        self._tree.setColumnWidth(0, 110)
-        self._tree.setColumnWidth(1, 160)
-        self._tree.setColumnWidth(2, 160)
-        self._tree.setColumnWidth(3, 110)
-        self._tree.setColumnWidth(4, 230)
-        self._tree.setColumnWidth(5, 110)
+        self._tree.setColumnWidth(0, dp(100))
+        self._tree.setColumnWidth(1, dp(140))
+        self._tree.setColumnWidth(2, dp(140))
+        self._tree.setColumnWidth(3, dp(100))
+        self._tree.setColumnWidth(4, dp(200))
+        self._tree.setColumnWidth(5, dp(100))
+        # 末列拉伸填满剩余宽度：原固定列宽合计 880px，宽屏下右侧留大片空白
+        self._tree.header().setStretchLastSection(True)
         self._tree.setAlternatingRowColors(True)
         self._tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         # 双击报文行就地展开/折叠（QTreeWidget 默认行为），展开时补齐子项

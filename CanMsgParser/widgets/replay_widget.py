@@ -22,6 +22,7 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 import can
 
 from core.can_connection import CanConnectionManager
+from utils.ui_scale import dp
 
 
 class _BlfLoadThread(QThread):
@@ -71,12 +72,12 @@ class ReplayWidget(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(dp(8), dp(8), dp(8), dp(8))
+        layout.setSpacing(dp(6))
 
         # ─── 文件选择 ───
         file_bar = QHBoxLayout()
-        file_bar.setSpacing(8)
+        file_bar.setSpacing(dp(6))
         self._path_edit = QLineEdit()
         self._path_edit.setReadOnly(True)
         self._path_edit.setPlaceholderText("未选择日志文件")
@@ -97,13 +98,13 @@ class ReplayWidget(QWidget):
         # ─── 回放设置 ───
         settings = QGroupBox("回放设置")
         s_layout = QHBoxLayout(settings)
-        s_layout.setSpacing(10)
+        s_layout.setSpacing(dp(8))
 
         s_layout.addWidget(QLabel("回放次数:"))
         self._passes_spin = QSpinBox()
         self._passes_spin.setRange(1, 999999)
         self._passes_spin.setValue(1)
-        self._passes_spin.setMinimumWidth(70)
+        self._passes_spin.setMinimumWidth(dp(64))
         s_layout.addWidget(self._passes_spin)
 
         self._loop_chk = QCheckBox("循环回放")
@@ -117,14 +118,14 @@ class ReplayWidget(QWidget):
         ):
             self._speed_combo.addItem(label, factor)
         self._speed_combo.setCurrentIndex(3)
-        self._speed_combo.setMinimumWidth(90)
+        self._speed_combo.setMinimumWidth(dp(80))
         s_layout.addWidget(self._speed_combo)
 
         s_layout.addWidget(QLabel("起始延迟(ms):"))
         self._delay_spin = QSpinBox()
         self._delay_spin.setRange(0, 60000)
         self._delay_spin.setValue(0)
-        self._delay_spin.setMinimumWidth(80)
+        self._delay_spin.setMinimumWidth(dp(72))
         s_layout.addWidget(self._delay_spin)
 
         s_layout.addStretch()
@@ -132,7 +133,7 @@ class ReplayWidget(QWidget):
 
         # ─── 控制按钮 ───
         ctrl = QHBoxLayout()
-        ctrl.setSpacing(8)
+        ctrl.setSpacing(dp(6))
         self._start_btn = QPushButton("▶ 开始回放")
         self._start_btn.setProperty("class", "primary")
         self._start_btn.clicked.connect(self._start_replay)
