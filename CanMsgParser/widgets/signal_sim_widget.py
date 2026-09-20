@@ -33,6 +33,7 @@ from core.can_utils import (
 )
 from core.can_connection import CanConnectionManager
 from widgets.del_key_filter import DelKeyFilter
+from widgets.elided_tooltip import ElidedListWidget
 from core.can_data import MessageDef, SignalDef
 from utils.ui_scale import dp
 
@@ -258,7 +259,8 @@ class SignalSimWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(dp(5))
         left_layout.addWidget(QLabel("已选信号（可删除）:"))
-        self._sel_list = QListWidget()
+        # ElidedListWidget：行文本被截断时，悬停显示完整内容
+        self._sel_list = ElidedListWidget()
         self._sel_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._sel_list.setAlternatingRowColors(True)
         left_layout.addWidget(self._sel_list, stretch=1)

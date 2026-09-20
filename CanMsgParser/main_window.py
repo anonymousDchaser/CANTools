@@ -28,7 +28,7 @@ from widgets.realtime_monitor_widget import RealtimeMonitorWidget
 from widgets.signal_sim_widget import SignalSimWidget
 from widgets.replay_widget import ReplayWidget
 from widgets.del_key_filter import DelKeyFilter
-from widgets.drag_reorder_list import DragReorderListWidget
+from widgets.drag_reorder_list import DragReorderListWidget, EYE_ROLE
 from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # 进程内共享的 CAN 连接管理器：模拟上报/实时监控/实时报文三页共用
         self._conn_manager = CanConnectionManager(self)
-        self.setWindowTitle("CAN 报文分析工具 v1.1.0")
+        self.setWindowTitle("CAN 报文分析工具 v1.2.0")
 
         # ── 窗口尺寸自适应可用屏幕 ──
         # 原实现固定 1920x1280：在 1080p 及以下屏幕上超出屏幕被系统裁切，最小
@@ -408,6 +408,9 @@ class MainWindow(QMainWindow):
         # 有序列表：顺序即列表显示顺序与右侧曲线图绘制顺序（可拖拽调整）
         self._curve_signals: list = []        # [(msg_name, sig_name)]
         self._curve_decode_gen: int = 0         # 避免过期解码批次误绘
+        # 曲线图中被「眼睛」闭合（隐藏）的信号集合，仅控制是否绘制，
+        # 不从 _curve_signals / _decoded_signals 中删除数据，恢复无需重新解码
+        self._curve_hidden: set = set()         # {(msg_name, sig_name)}
         self._dock_positioned: bool = False     # 分组窗仅首次显示时定位一次
 
         self._setup_ui()
@@ -536,9 +539,13 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(dp(6))
 
-        sel_label = QLabel("已选信号（长按 ⋮⋮ 拖动排序）:")
+        sel_label = QLabel("已选信号（点 👁 显隐 · 长按 ⋮⋮ 排序）:")
         sel_label.setStyleSheet("color: #9090a0; font-weight: 500;")
-        sel_label.setToolTip("长按行右侧 ⋮⋮ 把手拖动可调整顺序；选中后按 Delete 或「移除选中」可删除")
+        sel_label.setToolTip(
+            "点击行首 👁 眼睛图标：睁开=显示该曲线，闭眼=隐藏该曲线；\n"
+            "长按行右侧 ⋮⋮ 把手拖动可调整顺序；\n"
+            "选中后按 Delete 或「移除选中」可删除"
+        )
         left_layout.addWidget(sel_label)
 
         # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧曲线图绘制顺序）
@@ -546,10 +553,14 @@ class MainWindow(QMainWindow):
         self._selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._selected_list.setAlternatingRowColors(True)
         self._selected_list.setToolTip(
+            "点击行首眼睛图标可显示/隐藏对应曲线（数据保留，不重新解码）；\n"
             "长按行右侧 ⋮⋮ 把手并拖动可调整信号顺序；\n"
             "右侧曲线图按此列表顺序绘制与显示"
         )
         self._selected_list.orderChanged.connect(self._on_curve_order_changed)
+        # 行首眼睛图标：本页专属能力（实时监控页 / 信号分组面板不开启）
+        self._selected_list.set_eye_icons_enabled(True)
+        self._selected_list.eyeToggled.connect(self._on_curve_eye_toggled)
         left_layout.addWidget(self._selected_list, stretch=1)
 
         # Delete 键移除选中的已选信号（等价于「移除选中」按钮）
@@ -901,25 +912,61 @@ class MainWindow(QMainWindow):
 
     def _refresh_curve_list(self):
         """刷新曲线图「已选信号」列表（按 _curve_signals 顺序显示，
-        顺序即右侧曲线图绘制顺序）"""
+        顺序即右侧曲线图绘制顺序；行首眼睛状态按 _curve_hidden 回填）"""
         self._selected_list.blockSignals(True)
         self._selected_list.clear()
         for msg_name, sig_name in self._curve_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
             item.setData(Qt.UserRole, (msg_name, sig_name))
+            item.setData(EYE_ROLE, (msg_name, sig_name) not in self._curve_hidden)
             self._selected_list.addItem(item)
         self._selected_list.blockSignals(False)
 
+    def _on_curve_eye_toggled(self, row: int, visible: bool):
+        """已选信号列表眼睛图标点击回调：睁开显示 / 闭合隐藏对应曲线。
+
+        只改隐藏集合并重绘：解码结果仍缓存在 _decoded_signals，因此切显隐
+        不会触发重新解码，点一下立即生效。
+        """
+        item = self._selected_list.item(row)
+        if item is None:
+            return
+        key = item.data(Qt.UserRole)
+        if key is None:
+            return
+        key = tuple(key)
+        if visible:
+            self._curve_hidden.discard(key)
+        else:
+            self._curve_hidden.add(key)
+        self._sync_curve_visibility()
+        self._statusbar.showMessage(
+            f"{'显示' if visible else '隐藏'}信号: {key[1]}"
+        )
+
+    def _sync_curve_visibility(self):
+        """把「眼睛」隐藏状态同步到曲线图（仅控制是否绘制，不删数据）"""
+        plot = getattr(self, "_plot_widget", None)
+        if plot is not None:
+            plot.set_hidden_signals(self._curve_hidden)
+
     def _remove_selected_signals(self):
-        """从已选列表中移除选中项"""
+        """从已选列表中移除选中项（顺带清理其隐藏状态）"""
         for item in self._selected_list.selectedItems():
-            self._curve_signals.remove(item.data(Qt.UserRole))
+            key = item.data(Qt.UserRole)
+            if key is None:
+                continue
+            self._curve_signals.remove(key)
+            self._curve_hidden.discard(tuple(key))
         self._refresh_curve_list()
+        self._sync_curve_visibility()
 
     def _clear_selected_signals(self):
-        """清空所有已选信号"""
+        """清空所有已选信号（隐藏状态一并清空）"""
         self._curve_signals.clear()
+        self._curve_hidden.clear()
         self._refresh_curve_list()
+        self._sync_curve_visibility()
 
     def _decode_and_plot_curve(self):
         """对曲线图已选信号解码并绘图（加入即绘图 / 点击「绘制」）"""
@@ -1239,7 +1286,7 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         about_text = """
         <h2>CAN 报文分析工具</h2>
-        <p><b>版本:</b> 1.1.0</p>
+        <p><b>版本:</b> 1.2.0</p>
         <p><b>作者:</b> laizhenxin</p>
         <p><b>邮箱:</b> lzxDchaser@126.com</p>
         <hr>
@@ -1248,9 +1295,9 @@ class MainWindow(QMainWindow):
         <ul>
             <li>DBC 文件解析与信号浏览</li>
             <li>BLF/ASC 日志文件加载</li>
-            <li>多信号时间曲线绘制（支持缩放、平移、悬停高亮）</li>
+            <li>多信号时间曲线绘制（缩放 / 平移 / 悬停高亮 / 时间差标记与自动捕捉）</li>
             <li>信号分组管理与配置保存/加载</li>
-            <li>原始报文查看与解码</li>
+            <li>原始报文查看与解码（报文表格多 ID 筛选、实时报文筛选）</li>
             <li>DBC 位图可视化（Intel/Motorola）</li>
             <li>图表/数据导出</li>
         </ul>

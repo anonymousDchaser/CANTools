@@ -21,6 +21,7 @@ from workers.can_raw_capture_worker import CanRawCaptureWorker
 from core.can_utils import load_dbc, decode_frame
 from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE)
 from core.can_connection import CanConnectionManager
+from widgets.multi_select_filter import MultiSelectIdFilter
 from utils.ui_scale import dp
 
 
@@ -55,6 +56,14 @@ class RealtimeMessageWidget(QWidget):
         self._prev_raw: dict[int, dict] = {}
         # {sig_name: {int_val: "描述"}}，来自 DBC+Excel 合并（主窗口派发）
         self._value_descriptions: dict = {}
+        # 筛选：已勾选的报文 ID 集合（空 = 不按 ID 过滤）
+        self._filter_id_set: set[int] = set()
+        # 候选报文 ID（随报文到达 / DBC 加载累积），供筛选下拉列出
+        self._known_ids: set[int] = set()
+        # 已推送给筛选控件的候选项（避免每帧重建下拉列表）
+        self._filter_candidates: list = []
+        # 当前可见（未隐藏）的报文行数，用于筛选状态提示
+        self._shown_count = 0
         self._setup_ui()
 
     def _setup_ui(self):
@@ -104,6 +113,44 @@ class RealtimeMessageWidget(QWidget):
 
         layout.addLayout(bar)
 
+        # ─── 筛选栏：报文 ID 多选 + 报文名模糊搜索（不匹配的行隐藏，数据仍持续更新）───
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(dp(6))
+
+        lbl_id = QLabel("筛选 报文ID:")
+        lbl_id.setStyleSheet("color: #9090a0; font-weight: 500;")
+        filter_bar.addWidget(lbl_id)
+
+        self._id_filter = MultiSelectIdFilter()
+        self._id_filter.setFixedWidth(dp(180))
+        filter_bar.addWidget(self._id_filter)
+
+        lbl_name = QLabel("报文名:")
+        lbl_name.setStyleSheet("color: #9090a0; font-weight: 500;")
+        filter_bar.addWidget(lbl_name)
+
+        self._name_filter = QLineEdit()
+        self._name_filter.setPlaceholderText("模糊搜索...")
+        self._name_filter.setFixedWidth(dp(150))
+        self._name_filter.setToolTip("按报文名 / 报文 ID 模糊过滤（不区分大小写）")
+        filter_bar.addWidget(self._name_filter)
+
+        self._filter_reset_btn = QPushButton("重置筛选")
+        self._filter_reset_btn.setToolTip("清除报文 ID 与报文名筛选条件")
+        filter_bar.addWidget(self._filter_reset_btn)
+
+        self._filter_label = QLabel("")
+        self._filter_label.setStyleSheet("color: #9090a0;")
+        filter_bar.addWidget(self._filter_label)
+
+        filter_bar.addStretch()
+        layout.addLayout(filter_bar)
+
+        # 勾选 / 输入即时生效（行数最多数百，全量重判很轻）
+        self._id_filter.selectionChanged.connect(self._on_id_filter_changed)
+        self._name_filter.textChanged.connect(self._apply_filter)
+        self._filter_reset_btn.clicked.connect(self._reset_filter)
+
         # ─── 树：同 ID 单行（双击就地展开信号）───
         self._tree = QTreeWidget()
         self._tree.setColumnCount(6)
@@ -142,6 +189,11 @@ class RealtimeMessageWidget(QWidget):
                 self._db = db
                 for m in db.messages:
                     self._msg_names[m.frame_id] = m.name
+                    self._known_ids.add(m.frame_id)
+        # DBC 里的报文 ID 一并作为筛选候选；名称筛选需按新名称重判
+        self._refresh_id_candidates()
+        if self._name_filter.text().strip():
+            self._apply_filter()
 
     def set_connection(self, interface_type: str, channel: str, bitrate: int):
         self._interface_type = interface_type
@@ -321,9 +373,21 @@ class RealtimeMessageWidget(QWidget):
             placeholder.setText(1, "（双击展开解码信号）")
             placeholder.setForeground(1, QColor("#777777"))
             self._child_items[can_id] = {}
+            # 新报文行：按当前筛选决定显隐，并把新 ID 补进候选列表
+            visible = self._row_matches(can_id)
+            top.setHidden(not visible)
+            if visible:
+                self._shown_count += 1
+            if can_id not in self._known_ids:
+                self._known_ids.add(can_id)
+                self._refresh_id_candidates()
+            self._update_filter_label()
         else:
             if top.text(1) != name:
                 top.setText(1, name)
+                # 报文名后到（DBC 后加载）时，名称筛选需重判该行
+                if self._name_filter.text().strip():
+                    self._apply_filter()
             top.setText(2, str(dlc))
             top.setText(3, hex_str)
             cnt = int(top.text(4)) + 1
@@ -497,6 +561,62 @@ class RealtimeMessageWidget(QWidget):
                                        self._prev_raw.get(can_id, {}))
                 return
 
+    # ─────────────── 筛选 ───────────────
+
+    def _on_id_filter_changed(self):
+        self._filter_id_set = set(self._id_filter.selected_ids())
+        self._apply_filter()
+
+    def _row_matches(self, can_id: int) -> bool:
+        """当前筛选条件下该报文行是否应显示。"""
+        if self._filter_id_set and can_id not in self._filter_id_set:
+            return False
+        kw = self._name_filter.text().strip().lower()
+        if kw:
+            name = self._msg_names.get(can_id, "").lower()
+            if kw not in name and kw not in f"0x{can_id:03x}":
+                return False
+        return True
+
+    def _apply_filter(self):
+        """按当前条件显示/隐藏报文行。
+
+        只隐藏不删除：数据与计数仍在后台持续更新，取消筛选后立刻恢复显示，
+        不会因为筛选而丢帧或让「计数」列错乱。
+        """
+        shown = 0
+        for can_id, top in self._rows.items():
+            ok = self._row_matches(can_id)
+            top.setHidden(not ok)
+            if ok:
+                shown += 1
+        self._shown_count = shown
+        self._update_filter_label()
+
+    def _reset_filter(self):
+        self._name_filter.clear()
+        self._filter_id_set = set()
+        if self._id_filter.selected_ids():
+            # clear_selection 会经 selectionChanged 触发 _apply_filter
+            self._id_filter.clear_selection()
+        else:
+            self._apply_filter()
+
+    def _update_filter_label(self):
+        total = len(self._rows)
+        if self._filter_id_set or self._name_filter.text().strip():
+            self._filter_label.setText(f"显示 {self._shown_count} / {total} 个报文")
+        else:
+            self._filter_label.setText(f"共 {total} 个报文")
+
+    def _refresh_id_candidates(self):
+        """把新出现的报文 ID 补进筛选候选列表（已勾选项保持不变）。"""
+        ids = sorted(self._known_ids)
+        if ids == self._filter_candidates:
+            return
+        self._filter_candidates = ids
+        self._id_filter.set_ids(ids)
+
     def _on_clear(self):
         self._tree.clear()
         self._rows.clear()
@@ -506,6 +626,8 @@ class RealtimeMessageWidget(QWidget):
         self._cur_raw.clear()
         self._prev_raw.clear()
         self._last_data.clear()
+        self._shown_count = 0
+        self._update_filter_label()
 
     # ─────────────── 状态/错误 ───────────────
 

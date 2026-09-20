@@ -8,20 +8,36 @@
 - 拖动过程中绘制插入位置指示线，落下后移动行并发出 orderChanged 信号，
   由外部（主窗口 / 页面）同步数据顺序并按新顺序重绘曲线。
 
+可选能力（默认关闭，需显式 set_eye_icons_enabled(True) 开启）：
+- 第一列行左侧绘制一个「眼睛」图标，点击可切换睁开（显示该曲线）/ 闭合
+  （隐藏该曲线），切换后发出 eyeToggled(row, visible)；状态存于 item 的
+  EYE_ROLE，随行一起被 take/insert 移动，拖拽排序后不会错位。
+
 DragReorderMixin 提供通用拖拽逻辑，QListWidget 与 QTreeWidget 各自适配：
 - DragReorderListWidget：QListWidget 子类，所有行均可拖拽；
 - DragReorderTreeWidget：QTreeWidget 子类，仅「携带 UserRole 数据」的顶层项
   可拖拽（信号分组面板中分组标题行 / 子项不参与）。
 """
-from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, pyqtSignal, QMimeData
-from PyQt5.QtGui import QColor, QPainter, QPen, QDrag
+from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QPointF, pyqtSignal, QMimeData
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QDrag
 from PyQt5.QtWidgets import (
     QApplication, QListWidget, QTreeWidget, QStyledItemDelegate, QStyle,
     QStyleOptionViewItem,
 )
 
+from widgets.elided_tooltip import ElidedToolTipMixin
+
 # 拖拽行号的自定义 MIME 类型（仅限本控件内部移动）
 _MIME_TYPE = "application/x-canmsgparser-drag-row"
+
+# 行首「眼睛」图标状态的自定义 item data 角色：
+# True = 睁开（显示曲线），False = 闭合（隐藏曲线）。
+# 读取一律用 `is not False` 判定，未设置过该角色的行按「显示」处理。
+EYE_ROLE = Qt.UserRole + 100
+
+# 行首眼睛图标区域宽度（像素）。与 HANDLE_WIDTH 一样取固定值，不参与分辨率缩放，
+# 以保持与已有把手/行高的视觉比例一致。
+EYE_WIDTH = 22
 
 
 class _HandleDelegate(QStyledItemDelegate):
@@ -46,9 +62,17 @@ class _HandleDelegate(QStyledItemDelegate):
             and not index.parent().isValid()
             and self._owner._dnd_row_allowed(index.row())
         )
-        if is_handle_col:
-            # 文本/图标区域右缩进，避免与把手重叠
-            opt.rect = option.rect.adjusted(0, 0, -DragReorderMixin.HANDLE_WIDTH, 0)
+        # 眼睛图标同属「第一列顶层行」的装饰，与把手一左一右互不干扰
+        is_eye_col = (
+            index.column() == 0
+            and not index.parent().isValid()
+            and self._owner._eye_icons_enabled()
+        )
+        # 文字区域左让位眼睛、右让位把手，避免文字与图标重叠
+        left_inset = EYE_WIDTH if is_eye_col else 0
+        right_inset = DragReorderMixin.HANDLE_WIDTH if is_handle_col else 0
+        if left_inset or right_inset:
+            opt.rect = option.rect.adjusted(left_inset, 0, -right_inset, 0)
 
         widget = opt.widget
         style = widget.style() if widget else QApplication.style()
@@ -59,8 +83,64 @@ class _HandleDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, QColor(79, 195, 247, 30))
 
         style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+        if is_eye_col:
+            # 未设置 EYE_ROLE 的行按「显示」处理，避免历史行被画成闭眼
+            visible = index.data(EYE_ROLE) is not False
+            self._draw_eye(painter, option.rect, visible)
         if is_handle_col:
             self._draw_handle(painter, option.rect, index.row(), armed_row)
+
+    @staticmethod
+    def _draw_eye(painter, rect: QRect, visible: bool):
+        """在行矩形左侧绘制眼睛图标：睁开=眼形轮廓+瞳孔，闭合=下弯弧线。
+
+        visible=False（该曲线被隐藏）时整体用暗灰色，与显示中的浅色形成对比，
+        使用户一眼看出哪些信号当前不参与绘制。
+        """
+        cx = rect.left() + EYE_WIDTH // 2
+        cy = rect.center().y()
+        # 尺寸随行高自适应（夹在 6~9 之间），窄行/高行都不会过大过小
+        half_w = max(6.0, min(9.0, rect.height() * 0.34))
+        half_h = half_w * 0.62
+        color = QColor("#c8c8d8") if visible else QColor("#5a5a6e")
+        path = QPainterPath()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(color, 1.3)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        if visible:
+            # 上下两段对称二次贝塞尔拼成杏仁形眼廓
+            path.moveTo(cx - half_w, cy)
+            path.quadTo(cx, cy - half_h * 1.9, cx + half_w, cy)
+            path.quadTo(cx, cy + half_h * 1.9, cx - half_w, cy)
+            painter.drawPath(path)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(cx, cy), half_w * 0.26, half_w * 0.26)
+        else:
+            # 闭眼：下弯弧线（两端略高于中心），与睁眼的杏仁形一眼可辨
+            path.moveTo(cx - half_w, cy - half_h * 0.45)
+            path.quadTo(cx, cy + half_h * 1.2, cx + half_w, cy - half_h * 0.45)
+            painter.drawPath(path)
+        painter.restore()
+
+    def reserved_text_inset(self, index) -> int:
+        """本 delegate 在文字左右额外预留的宽度合计，供「截断即悬停提示」判断。
+
+        必须与 paint() 里的缩进规则保持一致：只有第一列顶层行的文字会左让位
+        眼睛、右让位把手；其余行（分组标题 / 子项）与其余列不缩进。
+        """
+        if index.column() != 0 or index.parent().isValid():
+            return 0
+        inset = 0
+        if self._owner._eye_icons_enabled():
+            inset += EYE_WIDTH
+        if index.row() >= 0 and self._owner._dnd_row_allowed(index.row()):
+            inset += DragReorderMixin.HANDLE_WIDTH
+        return inset
 
     @staticmethod
     def _draw_handle(painter, rect: QRect, row: int, armed_row: int):
@@ -102,6 +182,8 @@ class DragReorderMixin:
     """
 
     orderChanged = pyqtSignal()
+    # (行号, 是否显示)：行首眼睛图标被点击后发出，visible=False 表示隐藏该行曲线
+    eyeToggled = pyqtSignal(int, bool)
 
     HANDLE_WIDTH = 24      # 行右侧把手区域宽度（像素）
     LONG_PRESS_MS = 350    # 长按激活拖拽的时长（激活后无移动取消阈值）
@@ -124,6 +206,7 @@ class DragReorderMixin:
         # 重入（Qt 在部分场景会把鼠标事件回发给拖拽源），_drag_armed 仍为
         # True，不加保护会再次 _start_drag -> 嵌套模态循环 -> UI 卡死。
         self._drag_exec_active = False
+        self._eye_enabled = False      # 是否显示行首眼睛图标（默认关闭）
         self._long_press_timer = QTimer(self)
         self._long_press_timer.setSingleShot(True)
         self._long_press_timer.timeout.connect(self._on_long_press)
@@ -138,10 +221,82 @@ class DragReorderMixin:
         """最近一次 _move_row 成功后的目标行号，未发生过移动返回 -1。"""
         return self._last_moved_row
 
+    # ─────────────── 眼睛图标（显示 / 隐藏该行曲线） ───────────────
+
+    def set_eye_icons_enabled(self, enabled: bool):
+        """开启/关闭行首眼睛图标（默认关闭）。
+
+        目前仅供「曲线图页 · 已选信号列表」启用；实时监控页与信号分组面板
+        没有「隐藏某条曲线」的需求，保持关闭以免白占行首空间。
+        """
+        enabled = bool(enabled)
+        if enabled == self._eye_enabled:
+            return
+        self._eye_enabled = enabled
+        self.viewport().update()
+
+    def _eye_icons_enabled(self) -> bool:
+        """供 delegate 查询是否需要绘制眼睛图标。"""
+        return self._eye_enabled
+
+    def eyeVisible(self, row: int) -> bool:
+        """查询该行眼睛状态（True=睁开/显示曲线；行号无效时按显示处理）。"""
+        item = self._dnd_row_item(row)
+        if item is None:
+            return True
+        return item.data(EYE_ROLE) is not False
+
+    def set_eye_visible(self, row: int, visible: bool):
+        """设置该行眼睛状态并重绘该行（不发 eyeToggled，供外部回填/同步使用）。"""
+        item = self._dnd_row_item(row)
+        if item is None:
+            return
+        if (item.data(EYE_ROLE) is not False) == bool(visible):
+            return
+        item.setData(EYE_ROLE, bool(visible))
+        self._update_row(row)
+
+    def _eye_rect(self, row: int) -> QRect:
+        """行首眼睛图标的命中矩形（viewport 坐标；行号无效返回空矩形）。"""
+        if not (0 <= row < self._dnd_count()):
+            return QRect()
+        r = self._dnd_visual_rect(row)
+        if not r.isValid():
+            return QRect()
+        return QRect(r.left(), r.top(), EYE_WIDTH, r.height())
+
+    def _toggle_eye_at(self, pos) -> bool:
+        """点击落在行首眼睛图标上则切换该行显隐，返回是否已消费该次点击。
+
+        单独成方法便于 mousePressEvent 前置判定：命中即 return，不再进入
+        「选中行 / 长按启动拖拽」流程，避免点眼睛时误触拖拽。
+        """
+        if not self._eye_enabled:
+            return False
+        row = self._dnd_row_of(self._dnd_item_at(pos))
+        if row < 0 or not self._eye_rect(row).contains(pos):
+            return False
+        visible = not self.eyeVisible(row)
+        self.set_eye_visible(row, visible)
+        self.eyeToggled.emit(row, visible)
+        return True
+
+    def _update_row(self, row: int):
+        """局部重绘指定行（行号无效时整块重绘）。"""
+        r = self._dnd_visual_rect(row) if 0 <= row < self._dnd_count() else QRect()
+        if r.isValid():
+            self.viewport().update(r)
+        else:
+            self.viewport().update()
+
     # ────────────────────── 鼠标交互 ──────────────────────
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
+            # 眼睛图标优先：命中则只切换显隐，不进入选中/长按拖拽流程
+            if self._toggle_eye_at(e.pos()):
+                e.accept()
+                return
             item = self._dnd_item_at(e.pos())
             self._press_row = self._dnd_row_of(item)
             self._press_pos = e.pos()
@@ -332,8 +487,11 @@ class DragReorderMixin:
         return None
 
 
-class DragReorderListWidget(DragReorderMixin, QListWidget):
+class DragReorderListWidget(DragReorderMixin, ElidedToolTipMixin, QListWidget):
     """QListWidget 版：所有行均可长按把手拖拽排序。
+
+    同时接入「文字被截断则悬停提示完整内容」（ElidedToolTipMixin）：行文本
+    放不下时才弹提示，放得下时仍走控件级 tooltip（操作说明）。
 
     注意：Mixin 必须排在 Qt 基类之前。若写作 (QListWidget, DragReorderMixin)，
     C3 线性化会把 Mixin 排到全部 Qt 类之后、object 之前，Mixin 内所有
@@ -382,11 +540,12 @@ class DragReorderListWidget(DragReorderMixin, QListWidget):
         return True
 
 
-class DragReorderTreeWidget(DragReorderMixin, QTreeWidget):
+class DragReorderTreeWidget(DragReorderMixin, ElidedToolTipMixin, QTreeWidget):
     """QTreeWidget 版：仅携带 UserRole 数据的顶层项可长按把手拖拽排序。
 
     用于「信号分组」面板：非搜索态下顶层项即分组信号（可拖拽排序）；
     跨分组搜索态下顶层项为分组标题（无 UserRole 数据），不参与拖拽。
+    同时接入「文字被截断则悬停提示完整内容」（ElidedToolTipMixin）。
     """
 
     def __init__(self, parent=None):

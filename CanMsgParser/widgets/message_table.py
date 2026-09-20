@@ -26,6 +26,7 @@ import cantools
 from core.can_utils import load_dbc_database
 from core.can_data import MessageDef
 from core.byte_change import compute_byte_change_array, NO_CHANGE
+from widgets.multi_select_filter import MultiSelectIdFilter
 from utils.font_helper import UI_FONT_FAMILY, MONO_FONT_FAMILY, ui_font
 from utils.ui_scale import dp
 
@@ -583,10 +584,10 @@ class MessageTableWidget(QWidget):
         lbl_id.setStyleSheet("font-weight: bold;")
         filter_layout.addWidget(lbl_id)
 
-        self._id_filter = QComboBox()
-        self._id_filter.setEditable(True)
-        self._id_filter.setFixedWidth(dp(118))
-        self._id_filter.setToolTip("输入或选择报文 ID（十六进制）")
+        # 多选：可同时勾选多个报文 ID（原先只能选/输入单个 ID）
+        # tooltip 由控件自身 _update_text() 维护（随勾选状态变化），此处不覆盖
+        self._id_filter = MultiSelectIdFilter()
+        self._id_filter.setFixedWidth(dp(180))
         filter_layout.addWidget(self._id_filter)
 
         lbl_sig = QLabel("信号名:")
@@ -620,7 +621,8 @@ class MessageTableWidget(QWidget):
         self._apply_btn.clicked.connect(self._apply_filter)
         filter_layout.addWidget(self._apply_btn)
 
-        self._id_filter.lineEdit().returnPressed.connect(self._apply_filter)
+        # ID 勾选变化即时生效；其余条件仍可回车应用
+        self._id_filter.selectionChanged.connect(self._apply_filter)
         self._sig_filter.returnPressed.connect(self._apply_filter)
         self._time_start.returnPressed.connect(self._apply_filter)
         self._time_end.returnPressed.connect(self._apply_filter)
@@ -695,11 +697,10 @@ class MessageTableWidget(QWidget):
         self._model._value_descriptions = self._value_descriptions
         self._model.set_data(self._filtered_index, self._raw_data, byte_change)
 
-        self._id_filter.clear()
-        unique_ids = sorted(frame_index["arbitration_id"].unique())
-        self._id_filter.addItem("全部")
-        for aid in unique_ids:
-            self._id_filter.addItem(f"0x{aid:03X}", aid)
+        # 新数据源：ID 候选重建，勾选同步回到「全部」
+        # （否则会出现「控件仍显示已勾选某 ID、表格却展示新文件全量帧」的不一致）
+        self._id_filter.set_ids(sorted(frame_index["arbitration_id"].unique()),
+                                keep_selection=False)
 
     def get_filtered_index(self) -> pd.DataFrame | None:
         """返回当前过滤后的帧索引"""
@@ -735,13 +736,10 @@ class MessageTableWidget(QWidget):
             return
         df = self._frame_index
 
-        id_text = self._id_filter.currentText()
-        if id_text and id_text != "全部":
-            try:
-                aid = int(id_text, 16)
-                df = df[df["arbitration_id"] == aid]
-            except ValueError:
-                pass
+        # 报文 ID：多选，未勾选任何 ID 时不过滤
+        id_list = self._id_filter.selected_ids()
+        if id_list:
+            df = df[df["arbitration_id"].isin(id_list)]
 
         t_start = self._time_start.text().strip()
         t_end = self._time_end.text().strip()
@@ -772,7 +770,11 @@ class MessageTableWidget(QWidget):
         self._recompute_and_set()
 
     def _reset_filter(self):
-        self._id_filter.setCurrentText("全部")
+        # 先屏蔽信号再清 ID 勾选：否则 clear_selection 会先触发一次 _apply_filter
+        # （百万级帧时等于多一次全量重算），而其结果紧接着又被下面重算覆盖
+        self._id_filter.blockSignals(True)
+        self._id_filter.clear_selection()
+        self._id_filter.blockSignals(False)
         self._sig_filter.clear()
         self._time_start.clear()
         self._time_end.clear()

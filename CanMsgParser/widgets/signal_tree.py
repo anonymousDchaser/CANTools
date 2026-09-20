@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
 from widgets.del_key_filter import DelKeyFilter
+from widgets.elided_tooltip import ElidedListWidget, ElidedTreeWidget
 from widgets.theme import DARK_PANEL_QSS
 from utils.ui_scale import dp
 
@@ -82,7 +83,8 @@ class SignalTreeWidget(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(dp(4))
 
-        self._tree = QTreeWidget()
+        # ElidedTreeWidget：名称 / ID 列被省略号截断时，悬停显示完整内容
+        self._tree = ElidedTreeWidget()
         self._tree.setHeaderLabels(["名称", "ID/类型"])
         self._tree.setAlternatingRowColors(True)
         # 行高统一时可跳过逐行测量，长列表滚动更顺滑
@@ -132,7 +134,8 @@ class SignalTreeWidget(QWidget):
         )
         right_layout.addWidget(self._checked_count_label)
 
-        self._checked_list = QListWidget()
+        # ElidedListWidget：行文本被截断时，悬停显示「信号名 + 所属报文」
+        self._checked_list = ElidedListWidget()
         self._checked_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._checked_list.setAlternatingRowColors(True)
         self._checked_list.setMinimumWidth(dp(130))

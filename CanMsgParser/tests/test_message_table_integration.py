@@ -121,7 +121,7 @@ class TestFilterAndExpand:
         messages = parse_dbc(dbc_path)
         message_table.set_data(sample_frame_index, sample_raw_data, messages, dbc_path)
 
-        message_table._id_filter.setCurrentText("0x1A0")
+        message_table._id_filter.set_selected_ids([0x1A0])
         message_table._apply_filter()
 
         # 0x1A0 出现 3 次

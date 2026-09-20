@@ -7,6 +7,9 @@ __pycache__/
 build/
 *.spec
 
+# 安装包产物（Inno Setup 编译输出，可由 installer/installer.iss 重建，不入库）
+installer/output/
+
 # 构建临时垃圾目录（build.py 把上一版 dist/build 改名移到此处，不入库）
 .build_trash/
 

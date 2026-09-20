@@ -36,6 +36,22 @@ COLORS = [
     "#8d6e63", "#ec407a", "#78909c", "#d4e157", "#26c6da",
 ]
 
+# ─── 时间差标记 ───
+# 最多三组、每组两根线：同组两根线颜色一致，组与组之间用不同颜色区分
+MARK_GROUP_COLORS = ["#4fc3f7", "#ff7043", "#ab47bc"]
+MARK_PER_GROUP = 2        # 每组标记线数量（两根线界定一个时间区间）
+MARK_GROUPS_MAX = 3       # 同时保留的组数上限
+MARK_MAX = MARK_PER_GROUP * MARK_GROUPS_MAX   # 标记线总数上限
+MARK_SNAP_PX = 12         # 自动捕捉：最近的采样点距鼠标不超过该像素数才吸附
+MARK_HIT_PX = 8           # 拖动命中：按下位置距标记线不超过该像素数即进入拖动
+MARK_BAND_ALPHA = 0.13    # 组内「范围标识」色带的透明度
+MARK_LABEL_ZORDER = 12    # Δt 提示框层级：必须高于曲线与网格，否则会被压住显示不全
+MARK_LABEL_TOP = 0.97     # 第 1 组 Δt 提示框在绘图区内的 y（axes 坐标，取不到像素时兜底）
+MARK_LABEL_STEP = 0.085   # 组间错开距离（axes 坐标，取不到像素时兜底）
+MARK_LABEL_TOP_PX = 6     # 第 1 组 Δt 提示框距绘图区顶边的像素距离
+MARK_LABEL_STEP_PX = 20   # 相邻两组 Δt 提示框的像素间距（按像素换算，窗口矮时也不会叠压）
+MARK_LABEL_BOX_PX = 18    # 单个 Δt 提示框的高度估计（空间不足时用它反推可用间距）
+
 # ─── 深色图表主题配置（与设计系统一致） ───
 _DARK_THEME_RC = {
     "figure.facecolor": "#1e1e2e",
@@ -112,7 +128,16 @@ class PlotWidget(QWidget):
         self._signals: list[DecodedSignal] = []
         self._subplot_mode = True   # True=独立子图, False=共享Y轴（Task #6：曲线图默认独立子图）
         self._mark_mode = False      # 时间差标记模式
-        self._mark_points = []       # 已放置的标记时间戳
+        # 已放置的标记时间戳（扁平存放：每 MARK_PER_GROUP 个为一组）
+        self._mark_points = []
+        # 每根线的 artists：贯穿各子图的竖线 + 顶部时间标签
+        self._mark_artists: list = []
+        # 每组一条「范围标识」色带（每组在每个子图上各画一条，索引对齐组号）
+        self._mark_spans: list = []
+        # 每组的 Δt 提示框（索引对齐组号；组未放满时为空）
+        self._mark_delta_anns: list = []
+        self._dragging_mark: int = -1  # 正在拖动的标记序号（-1 = 未拖动，扁平索引）
+        self._preview_artists: list = []  # 标记模式下的吸附预览线
         self._annotation = None      # 悬停注释框
         self._highlighted_line = None
         self._original_linewidth = 1.8
@@ -126,6 +151,9 @@ class PlotWidget(QWidget):
         # Issue 1: line -> sig_name 映射，悬停注释用它精确取信号名（避免实时模式
         #          的 label 带 (0xID) 后缀导致 split(".")[-1] 取错匹配不到值描述）
         self._line_sig_name: dict = {}
+        # 「眼睛」显隐：被隐藏（眼睛闭合）的信号集合 {(msg_name, sig_name)}
+        # 仅控制是否绘制，不删除 _signals 中的数据，恢复显示无需重新解码
+        self._hidden: set = set()
         # ─── 实时曲线模式（用于信号实时监控页） ───
         self._realtime: bool = False            # 是否处于实时模式（停止后保留以保留画面）
         self._rt_running: bool = False           # 是否正在接收实时采样（停止后为 False 不再收数）
@@ -155,7 +183,15 @@ class PlotWidget(QWidget):
 
         self._mark_btn = QPushButton("标记时间差")
         self._mark_btn.setCheckable(True)
-        self._mark_btn.setToolTip("点击后在图上点两个位置，显示时间差")
+        self._mark_btn.setToolTip(
+            "点击放置标记线显示时间差（最多 3 组，每组 2 根）：\n"
+            "· 落点自动捕捉到最近的 CAN 帧采样点（放大 X 轴时便于对齐到指定帧）\n"
+            "· 标记线贯穿所有波形，可拖动调整，拖动时 Δt 实时更新\n"
+            "· 同组两根线同色，组间异色；两线之间的色带标出该组的时间范围，\n"
+            "  Δt 提示框显示在该色带上方\n"
+            "· 放满 3 组自动退出标记模式；再点本按钮可提前退出（已放的标记保留）\n"
+            "· 右键或「清除标记」按钮清空全部标记"
+        )
         self._mark_btn.clicked.connect(self._toggle_mark_mode)
         toolbar.addWidget(self._mark_btn)
 
@@ -246,25 +282,66 @@ class PlotWidget(QWidget):
         """
         self._value_descriptions = descriptions
 
+    def set_hidden_signals(self, hidden):
+        """设置需要隐藏（眼睛闭合）的信号集合，并立即重绘。
+
+        Args:
+            hidden: {(msg_name, sig_name), ...}，按 (msg_name, sig_name) 匹配
+                    _signals 中的信号；可传空集合以全部恢复显示。
+
+        被隐藏的信号不参与绘制：独立子图模式下整张子图不再出现，共享 Y 轴
+        模式下不画线也不进图例。数据仍保留在 _signals 中，恢复显示无需重新
+        解码，因此本方法只重绘、不触发解码。
+        """
+        new_hidden = {tuple(k) for k in (hidden or ())}
+        if new_hidden == self._hidden:
+            return
+        self._hidden = new_hidden
+        if not self._signals:
+            return  # 尚无数据：只记录状态，等下次 plot_signals 时生效
+        self._redraw()
+
+    def is_hidden(self, msg_name: str, sig_name: str) -> bool:
+        """该信号当前是否被隐藏（眼睛闭合）"""
+        return (msg_name, sig_name) in self._hidden
+
     # ────────────────────── 绘制逻辑 ──────────────────────
+
+    def _visible_signals(self) -> list:
+        """返回当前需要绘制的 [(原始索引, DecodedSignal), ...]。
+
+        被「眼睛」隐藏的信号不参与绘制。保留原始索引用于配色：若改用
+        enumerate(过滤后的列表)，隐藏中间某个信号会让其后的曲线整体换色。
+        """
+        return [(i, sig) for i, sig in enumerate(self._signals)
+                if (sig.msg_name, sig.sig_name) not in self._hidden]
 
     def _redraw(self):
         """根据当前模式和信号列表重绘"""
         self._fig.clear()
         self._fig.patch.set_facecolor("#1e1e2e")
+        # fig.clear() 会把标记线一并销毁：这里丢弃失效引用，稍后按 _mark_points 重建
+        self._mark_artists = []
+        self._mark_spans = []
+        self._mark_delta_anns = []
+        self._preview_artists = []
 
         # 实时模式：根据缓冲数据构建坐标轴与曲线
         if self._realtime and self._rt_meta:
             self._build_realtime()
+            self._restore_marks()
             self._canvas.draw()
             return
 
-        if not self._signals:
+        if not self._visible_signals():
             ax = self._fig.add_subplot(111)
             ax.set_facecolor("#1e1e2e")
-            ax.text(0.5, 0.5, "请勾选信号并点击绘图",
+            # 区分「一个信号都没选」与「已选但被眼睛全部隐藏」，后者给出恢复提示
+            hint = ("请勾选信号并点击绘图" if not self._signals
+                    else "所有曲线已隐藏（点击左侧眼睛图标恢复显示）")
+            ax.text(0.5, 0.5, hint,
                     transform=ax.transAxes, ha="center", va="center",
-                    fontsize=16, color="#666680", fontweight="light")
+                    fontsize=14, color="#666680", fontweight="light")
             ax.grid(True, alpha=0.3)
             self._canvas.draw()
             return
@@ -275,6 +352,8 @@ class PlotWidget(QWidget):
             self._draw_shared()
 
         self._fig.tight_layout(pad=2.0)
+        # 重绘后恢复时间差标记线（切换显隐/模式、重绘都不应丢掉已放置的标记）
+        self._restore_marks()
 
         # Issue 2: 为每个 axes 创建实时坐标显示文本（左下角）
         self._coord_texts.clear()
@@ -503,7 +582,8 @@ class PlotWidget(QWidget):
         ax.set_ylabel("物理值", fontsize=11)
         ax.grid(True, linestyle="--", alpha=0.4, color="#3a3a4e")
 
-        for i, sig in enumerate(self._signals):
+        # 跳过被眼睛隐藏的信号；i 为信号在完整列表中的原始序号，配色保持稳定
+        for i, sig in self._visible_signals():
             color = COLORS[i % len(COLORS)]
             ts, vals = self._downsample_if_needed(sig.timestamps, sig.values)
             label = f"{sig.msg_name}.{sig.sig_name}"
@@ -515,13 +595,15 @@ class PlotWidget(QWidget):
         legend.get_frame().set_edgecolor("#3a3a4e")
 
     def _draw_subplots(self):
-        """独立子图模式"""
-        n = len(self._signals)
+        """独立子图模式（被眼睛隐藏的信号不生成子图；配色用原始序号，
+        隐藏/恢复单个信号时其余子图的颜色保持不变）"""
+        items = self._visible_signals()
+        n = len(items)
         axes = self._fig.subplots(n, 1, sharex=True)
         if n == 1:
             axes = [axes]
 
-        for i, (ax, sig) in enumerate(zip(axes, self._signals)):
+        for (i, sig), ax in zip(items, axes):
             color = COLORS[i % len(COLORS)]
             ax.set_facecolor("#1e1e2e")
             ts, vals = self._downsample_if_needed(sig.timestamps, sig.values)
@@ -554,11 +636,28 @@ class PlotWidget(QWidget):
         self._redraw()
 
     def _toggle_mark_mode(self):
-        """切换时间差标记模式"""
+        """切换时间差标记模式。
+
+        进入时**不清空**已有标记：三组标记通常是连续放置的（放完一组仍留在标记模式
+        里接着放下一组），中途退出再进也应能接着标。只有已经放满 MARK_GROUPS_MAX 组
+        时才清空重来——否则会出现「图上有旧线、内部状态已清空」的不一致状态，
+        旧线既不会被替换也拖不动。
+        """
         self._mark_mode = self._mark_btn.isChecked()
-        self._mark_points.clear()
-        if not self._mark_mode:
-            self._clear_marks()
+        if self._mark_mode:
+            if len(self._mark_points) >= MARK_MAX:
+                self._clear_marks()
+        else:
+            self._remove_mark_preview()
+        self._update_mark_btn_text()
+
+    def _update_mark_btn_text(self):
+        """标记模式且已有落点时，在按钮上显示进度（n/总数）。"""
+        n = len(self._mark_points)
+        self._mark_btn.setText(
+            "标记时间差 %d/%d" % (n, MARK_MAX) if self._mark_mode and n
+            else "标记时间差"
+        )
 
     def _auto_scale(self):
         """自适应复位"""
@@ -569,20 +668,321 @@ class PlotWidget(QWidget):
         self._canvas.draw()
 
     def _clear_marks(self):
-        """清除所有时间差标记"""
+        """清除所有时间差标记（含范围色带、Δt 提示框与吸附预览）"""
         self._mark_points.clear()
+        self._dragging_mark = -1
+        self._mark_artists = []
+        self._mark_spans = []
+        self._mark_delta_anns = []
+        self._remove_mark_preview()
+        # 兜底：清理任何仍挂在坐标轴上的标记 / 预览 artist
         for ax in self._fig.axes:
             for child in ax.get_children():
-                if hasattr(child, "_is_time_mark") and child._is_time_mark:
-                    child.remove()
-        self._canvas.draw()
+                if (getattr(child, "_is_time_mark", False)
+                        or getattr(child, "_is_mark_preview", False)):
+                    try:
+                        child.remove()
+                    except Exception:  # noqa: BLE001
+                        pass
+        self._update_mark_btn_text()
+        self._canvas.draw_idle()
+
+    # ────────────────────── 时间差标记（吸附 / 贯穿 / 拖动）──────────────────────
+
+    def _snap_candidates(self) -> list:
+        """参与自动捕捉的采样时间序列（各可见信号的时间戳；实时模式下取缓冲）。"""
+        arrays = []
+        for _, sig in self._visible_signals():
+            ts = getattr(sig, "timestamps", None)
+            if ts is not None and len(ts):
+                arrays.append(np.asarray(ts, dtype=float))
+        if not arrays and self._rt_buffers:
+            for buf in self._rt_buffers.values():
+                if buf["t"]:
+                    arrays.append(np.asarray(buf["t"], dtype=float))
+        return arrays
+
+    def _snap_time(self, t, ax):
+        """把时间 t 吸附到最近的 CAN 帧采样点。
+
+        仅在最近的采样点距鼠标不超过 MARK_SNAP_PX 像素时吸附，否则保持原始
+        位置——避免 X 轴拉得很宽时把标记线「吸」到很远的帧上。
+        """
+        if t is None or ax is None:
+            return t
+        try:
+            px_per_unit = abs(
+                ax.transData.transform((1.0, 0.0))[0]
+                - ax.transData.transform((0.0, 0.0))[0]
+            )
+        except Exception:  # noqa: BLE001
+            return t
+        if px_per_unit <= 0:
+            return t
+
+        best_t = None
+        best_d = None
+        for arr in self._snap_candidates():
+            idx = int(np.searchsorted(arr, t))
+            for j in (idx - 1, idx):
+                if 0 <= j < len(arr):
+                    d = abs(float(arr[j]) - t)
+                    if best_d is None or d < best_d:
+                        best_d, best_t = d, float(arr[j])
+        if best_t is None:
+            return t
+        if best_d * px_per_unit > MARK_SNAP_PX:
+            return t
+        return best_t
+
+    def _render_marks(self):
+        """按 _mark_points 重建全部标记线。
+
+        标记线画在**每个**子图上（而非只画点击到的那一个），这样独立子图模式下
+        标记线贯穿所有波形，便于比较同一时刻不同信号的取值、以及周期不同的报文。
+        每 MARK_PER_GROUP 根线构成一组：组内两线同色，两线之间用半透明色带标出该组
+        的时间范围，Δt 提示框显示在该色带之上（见 _make_delta_ann）。
+        """
+        self._remove_mark_artists()
+        axes = self._fig.axes
+        if not axes:
+            return
+        for k, t in enumerate(self._mark_points):
+            color = self._mark_color(k)
+            artists = []
+            for ax in axes:
+                line = ax.axvline(x=t, color=color, linestyle="--",
+                                  linewidth=1.6, zorder=4)
+                line._is_time_mark = True
+                artists.append(line)
+            # 时间标签固定在绘图区顶部（x 用数据坐标、y 用 axes 坐标的混合变换）
+            label = axes[0].annotate(
+                f"t{k + 1} = {t:.4f}s",
+                xy=(t, 1.0), xycoords=axes[0].get_xaxis_transform(),
+                xytext=(0, 3), textcoords="offset points",
+                fontsize=8, color=color, fontweight="bold",
+                ha="center", va="bottom", zorder=6,
+            )
+            label._is_time_mark = True
+            artists.append(label)
+            self._mark_artists.append(artists)
+
+        # 已放满的组：范围色带 + Δt 提示框（索引与组号对齐）
+        for g, t1, t2 in self._mark_groups():
+            lo, hi = (t1, t2) if t1 <= t2 else (t2, t1)
+            color = self._mark_color(g * MARK_PER_GROUP)
+            spans = []
+            for ax in axes:
+                span = ax.axvspan(lo, hi, color=color, alpha=MARK_BAND_ALPHA,
+                                  linewidth=0, zorder=1.5)
+                span._is_time_mark = True
+                spans.append(span)
+            self._mark_spans.append(spans)
+            self._mark_delta_anns.append(self._make_delta_ann(g, lo, hi, color))
+
+    def _make_delta_ann(self, g: int, lo, hi, color: str):
+        """创建第 g 组的 Δt 提示框。
+
+        提示框放在**绘图区内部**的顶部，并按组向下错开：原先用 offset points 挂在
+        y=1.0 之上，框体会落到绘图区外，多子图模式下还会被上层子图压住，导致显示
+        不全；这里改用混合变换（x 数据坐标 / y axes 坐标）+ 高 zorder 修正。
+        """
+        ax = self._fig.axes[0]
+        mid = (lo + hi) / 2
+        ann = ax.annotate(
+            self._delta_text(g),
+            xy=(mid, self._mark_label_y(g)), xycoords=ax.get_xaxis_transform(),
+            ha=self._mark_label_ha(ax, mid), va="top",
+            fontsize=10, color=color, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="#2b2b2b",
+                      edgecolor=color, alpha=0.92),
+            zorder=MARK_LABEL_ZORDER,
+        )
+        ann._is_time_mark = True
+        return ann
+
+    @staticmethod
+    def _mark_color(k: int) -> str:
+        """第 k 根标记线的颜色：同组两根线同色，组与组之间换色。"""
+        return MARK_GROUP_COLORS[(k // MARK_PER_GROUP) % len(MARK_GROUP_COLORS)]
+
+    def _mark_label_y(self, g: int) -> float:
+        """第 g 组 Δt 提示框在绘图区内的 y（axes 坐标）。
+
+        错开距离按**像素**换算成 axes 分数：若直接用固定比例，绘图区较矮时三组提示框
+        会重新叠在一起。绘图区矮到按固定间距会顶到底边时，再自动压缩间距并上提首组，
+        保证每一组的提示框都完整落在绘图区内——「提示框显示不全」正是要避免的情况。
+        """
+        h = 0.0
+        if self._fig.axes:
+            try:
+                h = float(self._fig.axes[0].get_window_extent().height)
+            except Exception:  # noqa: BLE001
+                h = 0.0
+        if h <= 0:
+            return max(MARK_LABEL_TOP - g * MARK_LABEL_STEP, 0.10)
+
+        n = max(MARK_GROUPS_MAX - 1, 1)
+        top, step = MARK_LABEL_TOP_PX, MARK_LABEL_STEP_PX
+        if top + step * n + MARK_LABEL_BOX_PX > h:
+            top = 2.0
+            step = max((h - top - MARK_LABEL_BOX_PX) / n, 1.0)
+        return max(1.0 - (top + g * step) / h, 0.0)
+
+    @staticmethod
+    def _mark_label_ha(ax, x) -> str:
+        """提示框对齐方式：贴近左右边界时改用边缘对齐，避免框体溢出绘图区。"""
+        try:
+            x0, x1 = ax.get_xlim()
+            frac = (x - x0) / (x1 - x0) if x1 > x0 else 0.5
+        except Exception:  # noqa: BLE001
+            return "center"
+        if frac < 0.18:
+            return "left"
+        if frac > 0.82:
+            return "right"
+        return "center"
+
+    def _mark_groups(self) -> list:
+        """把扁平的 _mark_points 按「每 MARK_PER_GROUP 根一组」切分，只返回完整组。"""
+        out = []
+        for g in range(len(self._mark_points) // MARK_PER_GROUP):
+            i = g * MARK_PER_GROUP
+            out.append((g, self._mark_points[i], self._mark_points[i + 1]))
+        return out
+
+    def _delta_text(self, g: int = 0) -> str:
+        """第 g 组的时间差文本。"""
+        i = g * MARK_PER_GROUP
+        t1, t2 = self._mark_points[i], self._mark_points[i + 1]
+        return f"Δt{g + 1} = {abs(t2 - t1):.4f} s"
+
+    def _remove_mark_artists(self):
+        for artists in list(self._mark_artists) + list(self._mark_spans):
+            for art in artists:
+                try:
+                    art.remove()
+                except Exception:  # noqa: BLE001
+                    pass
+        for ann in self._mark_delta_anns:
+            try:
+                ann.remove()
+            except Exception:  # noqa: BLE001
+                pass
+        self._mark_artists = []
+        self._mark_spans = []
+        self._mark_delta_anns = []
+
+    def _restore_marks(self):
+        """重绘后按 _mark_points 恢复标记线（_fig.clear() 会连标记一起销毁）。"""
+        if self._mark_points:
+            self._render_marks()
+
+    def _add_mark(self, t):
+        """在时间 t 放置一根标记线；每放满一组会自动补上范围色带与 Δt 提示框。"""
+        if len(self._mark_points) >= MARK_MAX:
+            return
+        self._mark_points.append(float(t))
+        self._render_marks()
+        self._update_mark_btn_text()
+        self._canvas.draw_idle()
+
+    def _move_mark(self, idx: int, t):
+        """把第 idx 根标记线移到时间 t（拖动中实时调用）。
+
+        这里只做局部更新（竖线 / 顶部时间标签 / 所属组的色带与 Δt 文本），不整幅重建，
+        避免拖动过程中反复创建 artist。
+        """
+        if idx < 0 or idx >= len(self._mark_points):
+            return
+        self._mark_points[idx] = float(t)
+        artists = self._mark_artists[idx] if idx < len(self._mark_artists) else []
+        for art in artists:
+            if hasattr(art, "set_xdata"):      # 竖线
+                art.set_xdata([t, t])
+            else:                               # 顶部时间标签
+                art.xy = (t, 1.0)
+                art.set_text(f"t{idx + 1} = {float(t):.4f}s")
+        # 该线所属组的范围色带与 Δt 提示框跟随刷新（需求里的「动态显示距离」）
+        g = idx // MARK_PER_GROUP
+        if (g + 1) * MARK_PER_GROUP <= len(self._mark_points):
+            self._update_mark_group(g)
+        self._canvas.draw_idle()
+
+    def _update_mark_group(self, g: int) -> None:
+        """同步第 g 组的范围色带与 Δt 提示框（就地更新，不重建 artist）。"""
+        i = g * MARK_PER_GROUP
+        t1, t2 = self._mark_points[i], self._mark_points[i + 1]
+        lo, hi = (t1, t2) if t1 <= t2 else (t2, t1)
+        for span in (self._mark_spans[g] if g < len(self._mark_spans) else []):
+            span.set_x(lo)
+            span.set_width(hi - lo)
+        if g < len(self._mark_delta_anns) and self._mark_delta_anns[g] is not None:
+            ann = self._mark_delta_anns[g]
+            mid = (lo + hi) / 2
+            ann.xy = (mid, self._mark_label_y(g))
+            ann.set_ha(self._mark_label_ha(ann.axes, mid))
+            ann.set_text(self._delta_text(g))
+
+    def _mark_index_near(self, event, px: int = MARK_HIT_PX) -> int:
+        """鼠标按下位置附近的标记线序号（-1 表示没有）。"""
+        if event.inaxes is None or not self._mark_points or event.xdata is None:
+            return -1
+        try:
+            best_i, best_px = -1, float(px)
+            for i, t in enumerate(self._mark_points):
+                tx = event.inaxes.transData.transform((t, 0.0))[0]
+                d = abs(tx - event.x)
+                if d <= best_px:
+                    best_i, best_px = i, d
+            return best_i
+        except Exception:  # noqa: BLE001
+            return -1
+
+    def _update_mark_preview(self, t):
+        """标记模式下绘制吸附预览线（提示即将落在哪个采样点上）。"""
+        axes = self._fig.axes
+        if not axes:
+            return
+        if len(self._preview_artists) != len(axes) + 1:
+            self._remove_mark_preview()
+            for ax in axes:
+                line = ax.axvline(x=t, color="#ffffff", linestyle=":",
+                                  linewidth=1.0, alpha=0.55)
+                line._is_mark_preview = True
+                self._preview_artists.append(line)
+            label = axes[0].annotate(
+                "", xy=(t, 1.0), xycoords=axes[0].get_xaxis_transform(),
+                xytext=(0, 3), textcoords="offset points",
+                fontsize=8, color="#ffffff", ha="center", va="bottom",
+            )
+            label._is_mark_preview = True
+            self._preview_artists.append(label)
+        for art in self._preview_artists:
+            if hasattr(art, "set_xdata"):
+                art.set_xdata([t, t])
+            else:
+                art.xy = (t, 1.0)
+                art.set_text(f"{t:.4f}s")
+        self._canvas.draw_idle()
+
+    def _remove_mark_preview(self):
+        for art in self._preview_artists:
+            try:
+                art.remove()
+            except Exception:  # noqa: BLE001
+                pass
+        self._preview_artists = []
 
     # ────────────────────── 鼠标交互 ──────────────────────
 
     def _on_mouse_move(self, event):
-        """鼠标移动：曲线悬停高亮 + 实时坐标显示"""
+        """鼠标移动：曲线悬停高亮 + 实时坐标显示 + 标记吸附预览 / 拖动"""
         if event.inaxes is None:
             self._remove_highlight()
+            # 移出绘图区：收起吸附预览，避免残留一条误导性的线
+            if self._mark_mode and self._dragging_mark < 0:
+                self._remove_mark_preview()
             return
 
         # Issue 2: 更新当前 axes 的坐标显示
@@ -591,7 +991,18 @@ class PlotWidget(QWidget):
             self._coord_texts[ax_id].set_text(f"x={event.xdata:.4f}  y={event.ydata:.4f}")
             self._canvas.draw_idle()
 
+        # 拖动标记线：实时移动（同样自动吸附到采样点）并刷新 Δt
+        if self._dragging_mark >= 0:
+            if event.xdata is not None:
+                self._move_mark(self._dragging_mark,
+                                self._snap_time(event.xdata, event.inaxes))
+            return
+
+        # 标记模式：显示吸附预览线，提示即将落在哪个 CAN 帧上
         if self._mark_mode:
+            if event.xdata is not None:
+                self._update_mark_preview(
+                    self._snap_time(event.xdata, event.inaxes))
             return
 
         # 只在鼠标所在的 axes 中查找最近曲线，避免子图模式下跨 axes 误匹配
@@ -606,6 +1017,10 @@ class PlotWidget(QWidget):
         best_point = None
 
         for line in ax.get_lines():
+            # 跳过时间差标记线与吸附预览线（它们不是数据曲线，y 只有 0~1）
+            if (getattr(line, "_is_time_mark", False)
+                    or getattr(line, "_is_mark_preview", False)):
+                continue
             # Issue 7: 跳过已固定的曲线（它们有自己的持久注释）
             if line in self._pinned_lines:
                 continue
@@ -746,13 +1161,28 @@ class PlotWidget(QWidget):
             ax.set_ylim(new_lo, new_hi)
 
     def _on_click(self, event):
-        """鼠标点击（含 Issue 7: 点击固定/取消固定曲线高亮）"""
-        if event.inaxes is None:
+        """鼠标点击（含 Issue 7: 固定曲线高亮 / 标记线拖动 / 放置时间差标记）"""
+        if event.inaxes is None or event.xdata is None:
             return
 
-        # 时间差标记模式
+        # 左键按在已有标记线附近：进入拖动（不依赖标记模式，放置完也能继续微调）
+        if event.button == 1:
+            idx = self._mark_index_near(event)
+            if idx >= 0:
+                self._dragging_mark = idx
+                self._remove_highlight()
+                self._remove_mark_preview()
+                return
+
+        # 时间差标记模式：放置标记（落点自动吸附到最近的 CAN 帧采样点）
         if self._mark_mode and event.button == 1:
-            self._place_mark(event)
+            self._add_mark(self._snap_time(event.xdata, event.inaxes))
+            if len(self._mark_points) >= MARK_MAX:
+                # 三组放满后自动退出标记模式；标记线仍可随时拖动调整
+                self._mark_mode = False
+                self._mark_btn.setChecked(False)
+                self._remove_mark_preview()
+                self._update_mark_btn_text()
             return
 
         # 右键清除标记
@@ -786,6 +1216,10 @@ class PlotWidget(QWidget):
         best_dist = float("inf")
 
         for line in ax.get_lines():
+            # 跳过时间差标记线与吸附预览线（非数据曲线）
+            if (getattr(line, "_is_time_mark", False)
+                    or getattr(line, "_is_mark_preview", False)):
+                continue
             xdata = line.get_xdata()
             ydata = line.get_ydata()
             if len(xdata) == 0:
@@ -867,6 +1301,13 @@ class PlotWidget(QWidget):
 
     def _on_release(self, event):
         """鼠标释放"""
+        # 拖动标记线结束：只结束拖动，不触发画布平移
+        if self._dragging_mark >= 0:
+            self._dragging_mark = -1
+            self._drag_start = None
+            self._canvas.draw_idle()
+            return
+
         if self._drag_start is None:
             return
 
@@ -885,37 +1326,4 @@ class PlotWidget(QWidget):
             ax.set_ylim(ylim[0] + dy, ylim[1] + dy)
 
         self._drag_start = None
-        self._canvas.draw_idle()
-
-    def _place_mark(self, event):
-        """放置时间差标记"""
-        t = event.xdata
-        self._mark_points.append(t)
-
-        ax = event.inaxes
-        line = ax.axvline(x=t, color="#ef5350", linestyle="--", linewidth=1.5)
-        line._is_time_mark = True
-        # Bug 3 修复：为时间标记文本设置 _is_time_mark 属性，确保清除时能找到
-        time_text = ax.text(t, ax.get_ylim()[1], f"  {t:.4f}s",
-                color="#ef5350", fontsize=8, va="bottom", fontweight="bold")
-        time_text._is_time_mark = True
-
-        if len(self._mark_points) == 2:
-            t1, t2 = self._mark_points
-            delta = abs(t2 - t1)
-            mid = (t1 + t2) / 2
-            delta_ann = ax.annotate(
-                f"Δt = {delta:.4f} s",
-                xy=(mid, ax.get_ylim()[1]),
-                fontsize=11, color="#ef5350", fontweight="bold",
-                ha="center", va="bottom",
-                bbox=dict(boxstyle="round,pad=0.4", facecolor="#2b2b2b",
-                          edgecolor="#ef5350", alpha=0.9),
-            )
-            # Bug 3 修复：为 delta time 注释设置 _is_time_mark 属性
-            delta_ann._is_time_mark = True
-            # 自动退出标记模式
-            self._mark_mode = False
-            self._mark_btn.setChecked(False)
-
         self._canvas.draw_idle()
