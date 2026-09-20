@@ -185,8 +185,8 @@ python build.py
 
 产物为 `installer/output/CanMsgParser_Setup_<版本>.exe`。
 
-- `installer/installer.iss` **纳入版本管理**；`installer/output/`（64 MB 级的安装包
-  二进制）属可重建产物，已在 `.gitignore` 中忽略，不入库。
+- `installer/installer.iss` 与产物 `installer/output/CanMsgParser_Setup_<版本>.exe`
+  **均纳入版本管理**——与 `dist/` 一致，安装包随版本一起提交，`.gitignore` 不做忽略。
 - 版本号在 `installer.iss` 的 `MyAppVersion` 定义，需与 `main_window.py` 窗口标题 /
   关于对话框、`widgets/splash_screen.py`、本 README 标题**四处保持一致**。
 - 用户级安装（`PrivilegesRequired=lowest` + `DefaultDirName={localappdata}`），全程
