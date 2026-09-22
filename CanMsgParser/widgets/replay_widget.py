@@ -12,6 +12,8 @@
 发送复用「连接状态」页注入的共享连接管理器（与模拟上报页同一总线），
 因此无需在本页配置通道/波特率。
 """
+import os
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QListWidget, QListWidgetItem, QAbstractItemView, QGroupBox, QSpinBox,
@@ -22,6 +24,7 @@ from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 import can
 
 from core.can_connection import CanConnectionManager
+from core.log_loader import AscMessageReader
 from utils.ui_scale import dp
 
 
@@ -38,8 +41,14 @@ class _BlfLoadThread(QThread):
     def run(self):
         try:
             msgs = []
-            # LogReader 自动识别 .blf / .asc / .log / .csv 等格式
-            with can.LogReader(self._path) as reader:
+            # .asc 走自研解析器：python-can 的 ASCReader 在解析文件头时会吞掉
+            # 首帧（详见 core/log_loader.AscMessageReader 说明）。若这里用
+            # LogReader，会出现「分析页 133898 帧、回放页 133897 帧」的不一致。
+            # 其余格式（.blf / .log / .csv）仍交给 LogReader 自动识别。
+            ext = os.path.splitext(self._path)[1].lower()
+            reader = (AscMessageReader(self._path) if ext == ".asc"
+                      else can.LogReader(self._path))
+            with reader:
                 for m in reader:
                     msgs.append(m)
             self.progress.emit(100)

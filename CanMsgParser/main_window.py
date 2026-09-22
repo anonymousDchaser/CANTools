@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # 进程内共享的 CAN 连接管理器：模拟上报/实时监控/实时报文三页共用
         self._conn_manager = CanConnectionManager(self)
-        self.setWindowTitle("CAN 报文分析工具 v1.2.0")
+        self.setWindowTitle("CAN 报文分析工具 v1.2.1")
 
         # ── 窗口尺寸自适应可用屏幕 ──
         # 原实现固定 1920x1280：在 1080p 及以下屏幕上超出屏幕被系统裁切，最小
@@ -1286,7 +1286,7 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         about_text = """
         <h2>CAN 报文分析工具</h2>
-        <p><b>版本:</b> 1.2.0</p>
+        <p><b>版本:</b> 1.2.1</p>
         <p><b>作者:</b> laizhenxin</p>
         <p><b>邮箱:</b> lzxDchaser@126.com</p>
         <hr>

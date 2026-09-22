@@ -52,6 +52,11 @@ MARK_LABEL_TOP_PX = 6     # 第 1 组 Δt 提示框距绘图区顶边的像素�
 MARK_LABEL_STEP_PX = 20   # 相邻两组 Δt 提示框的像素间距（按像素换算，窗口矮时也不会叠压）
 MARK_LABEL_BOX_PX = 18    # 单个 Δt 提示框的高度估计（空间不足时用它反推可用间距）
 
+HOVER_ZORDER = 20         # 「数据点说明」框层级：图例默认 zorder=5、Δt 提示框 12，
+                          # 必须高于它们，否则会被图例/标记框遮住
+HOVER_OFFSET_PTS = 15     # 说明框相对数据点的初始偏移（points）
+HOVER_FLIP_RATIO = 0.55   # 数据点在绘图区内的相对位置超过该比例时，说明框反向摆放
+
 # ─── 深色图表主题配置（与设计系统一致） ───
 _DARK_THEME_RC = {
     "figure.facecolor": "#1e1e2e",
@@ -1094,15 +1099,86 @@ class PlotWidget(QWidget):
         if self._annotation is not None:
             self._annotation.remove()
 
-        self._annotation = ax.annotate(
-            text, xy=(x, y), xytext=(15, 15),
+        self._annotation = self._create_point_annotation(ax, text, x, y, color)
+        self._canvas.draw_idle()
+
+    def _create_point_annotation(self, ax, text, x, y, color,
+                                 facecolor="#252535", offset=None):
+        """创建「数据点说明」框（悬停高亮与点击固定共用）。
+
+        统一解决两个历史问题：
+        ① 贴边看不全：原实现用固定 xytext 偏移，数据点靠近绘图区右/上边缘时
+           框体落到区外被裁掉。这里先按数据点相对位置翻转偏移方向（只把朝
+           正方向的偏移翻转，不改变原有摆放习惯），再用渲染器**实测**框体
+           尺寸，把越界部分夹回绘图区内。
+        ② 被图例遮挡：annotate 默认 zorder=3，低于图例(5) 与 Δt 提示框(12)，
+           故显式抬到 HOVER_ZORDER(20)。
+        """
+        off = offset if offset is not None else (HOVER_OFFSET_PTS, HOVER_OFFSET_PTS)
+        off = self._flip_offset_at_edge(ax, x, y, off)
+        ann = ax.annotate(
+            text, xy=(x, y), xytext=off,
             textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="#252535",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor=facecolor,
                       edgecolor=color, alpha=0.92),
             fontsize=9, color="#e0e0e0",
             arrowprops=dict(arrowstyle="->", color=color, lw=1.2),
+            zorder=HOVER_ZORDER,
         )
-        self._canvas.draw_idle()
+        self._clamp_annotation_to_axes(ann, ax)
+        return ann
+
+    @staticmethod
+    def _flip_offset_at_edge(ax, x, y, off):
+        """数据点靠绘图区右/上边缘时，把朝正方向的偏移反向，避免框体一出场就出界。"""
+        ox, oy = off
+        try:
+            px, py = ax.transData.transform((x, y))
+            bx0, by0, bw, bh = ax.bbox.bounds
+        except Exception:  # noqa: BLE001
+            return off
+        if not bw or not bh:
+            return off
+        if (px - bx0) / bw > HOVER_FLIP_RATIO and ox > 0:
+            ox = -ox
+        if (py - by0) / bh > HOVER_FLIP_RATIO and oy > 0:
+            oy = -oy
+        return (ox, oy)
+
+    def _clamp_annotation_to_axes(self, ann, ax):
+        """按实测框体尺寸把说明框夹回绘图区内（渲染器不可用时跳过）。
+
+        位移量 = 越界像素数，按当前 DPI 换算成 offset points 回写；
+        只做一次修正即可（修正量就是越界量）。
+        """
+        canvas = getattr(self, "_canvas", None)
+        try:
+            renderer = canvas.get_renderer()
+            bb = ann.get_window_extent(renderer)
+        except Exception:  # noqa: BLE001
+            return
+        ax_bb = ax.bbox
+        dx = dy = 0.0
+        if bb.x1 > ax_bb.x1:                    # 右侧越界 → 左移
+            dx = ax_bb.x1 - bb.x1
+        if bb.x0 + dx < ax_bb.x0:               # 左移过头 → 再右移到贴左边界
+            dx = ax_bb.x0 - bb.x0
+        if bb.y1 > ax_bb.y1:                    # 上方越界 → 下移
+            dy = ax_bb.y1 - bb.y1
+        if bb.y0 + dy < ax_bb.y0:               # 下移过头 → 再上移到贴底边界
+            dy = ax_bb.y0 - bb.y0
+        if not dx and not dy:
+            return
+        try:
+            dpi = float(canvas.figure.dpi) or 100.0
+        except Exception:  # noqa: BLE001
+            dpi = 100.0
+        k = 72.0 / dpi                          # 像素 → points
+        try:
+            ox, oy = ann.get_position()
+            ann.set_position((ox + dx * k, oy + dy * k))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _remove_highlight(self):
         """移除高亮和注释"""
@@ -1287,13 +1363,9 @@ class PlotWidget(QWidget):
             if hasattr(line_color, '__iter__') and not isinstance(line_color, str):
                 import matplotlib.colors as mcolors
                 line_color = mcolors.to_hex(line_color)
-            ann = ax.annotate(
-                text, xy=(x, y), xytext=(15, -25),
-                textcoords="offset points",
-                bbox=dict(boxstyle="round,pad=0.4", facecolor="#2b2b2b",
-                          edgecolor=line_color, alpha=0.92),
-                fontsize=9, color="#e0e0e0",
-                arrowprops=dict(arrowstyle="->", color=line_color, lw=1.2),
+            ann = self._create_point_annotation(
+                ax, text, x, y, line_color,
+                facecolor="#2b2b2b", offset=(HOVER_OFFSET_PTS, -25),
             )
             self._pinned_annotations[line] = ann
 

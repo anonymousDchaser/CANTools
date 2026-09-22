@@ -1,6 +1,6 @@
 # widgets/realtime_message_widget.py
 """实时报文页：监听总线上全部报文，按报文 ID 单行展示原始数据，
-双击报文行就地展开显示其解码信号（含「上一次的值」）；支持清除、录制 BLF。
+双击报文行就地展开显示其解码信号（含「上一次的值」）；支持清除、录制 BLF/ASC。
 
 与「报文表格」页的区别：
 - 本页面向实时总线，同 ID 只保留一行（原地更新），不按帧展开；
@@ -12,7 +12,7 @@ from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QLineEdit, QLabel, QFileDialog, QAbstractItemView,
+    QPushButton, QLineEdit, QLabel, QFileDialog, QAbstractItemView, QComboBox,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
@@ -26,7 +26,7 @@ from utils.ui_scale import dp
 
 
 class RealtimeMessageWidget(QWidget):
-    """实时报文监控页（同 ID 单行 + 双击就地展开 + 录制 BLF）"""
+    """实时报文监控页（同 ID 单行 + 双击就地展开 + 录制 BLF/ASC）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,10 +95,22 @@ class RealtimeMessageWidget(QWidget):
         self._stop_rec_btn.clicked.connect(self._on_stop_record)
         bar.addWidget(self._stop_rec_btn)
 
+        bar.addWidget(QLabel("录制格式:"))
+        self._rec_format = QComboBox()
+        self._rec_format.addItems(["BLF", "ASC"])
+        self._rec_format.setFixedWidth(dp(72))
+        self._rec_format.setToolTip(
+            "录制文件格式：\n"
+            "• BLF：Vector 二进制格式，体积小、写入快（推荐长时间 / 大数据量录制）\n"
+            "• ASC：CANoe ASCII 文本格式，纯文本可读，便于文本工具二次处理，\n"
+            "  但同内容体积明显更大"
+        )
+        bar.addWidget(self._rec_format)
+
         bar.addWidget(QLabel("录制路径:"))
         self._rec_path = QLineEdit()
         self._rec_path.setPlaceholderText(
-            "默认：进程同级目录/CANLOG_年月日_时分秒.blf"
+            "默认：进程同级目录/CANLOG_年月日_时分秒.blf（ASC 格式则为 .asc）"
         )
         bar.addWidget(self._rec_path, stretch=1)
 
@@ -332,10 +344,12 @@ class RealtimeMessageWidget(QWidget):
         base = self._rec_path.text().strip()
         if not base:
             base = self._process_dir()
-        if os.path.isfile(base):
-            base = os.path.dirname(base)
+        # 输入框里可能是上一次录制的完整文件路径 → 取其所在目录
+        if os.path.isfile(base) or os.path.splitext(base)[1].lower() in (".blf", ".asc"):
+            base = os.path.dirname(base) or self._process_dir()
         os.makedirs(base, exist_ok=True)
-        name = f"CANLOG_{datetime.now():%Y%m%d_%H%M%S}.blf"
+        ext = ".asc" if self._rec_format.currentIndex() == 1 else ".blf"
+        name = f"CANLOG_{datetime.now():%Y%m%d_%H%M%S}{ext}"
         full = os.path.join(base, name)
         self._rec_path.setText(full)
         self._capture_worker.start_recording(full)

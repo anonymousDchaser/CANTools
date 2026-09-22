@@ -4,7 +4,7 @@
 ; 编译命令（项目根目录）：
 ;     "C:\Users\<你>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\installer.iss
 ; 产物：
-;     installer\output\CanMsgParser_Setup_1.2.0.exe
+;     installer\output\CanMsgParser_Setup_1.2.1.exe
 ;
 ; 设计要点：
 ;   - dist\CanMsgParser 已是自包含产物（Python 运行时 / PyQt5 / VC 运行库全在内），
@@ -15,7 +15,7 @@
 ;     {app}\_internal 导致「默认录制目录不可写」的问题（受限目录才会踩）。
 
 #define MyAppName "CanMsgParser"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "lzxDChaser"
 #define MyAppExeName "CanMsgParser.exe"
 #define MySourceDir "..\dist\CanMsgParser"
