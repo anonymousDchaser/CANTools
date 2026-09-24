@@ -93,7 +93,7 @@ class SplashScreen(QSplashScreen):
         painter.drawText(
             QRectF(0, 58, self.SPLASH_W, 20),
             Qt.AlignCenter,
-            "CAN Bus Message Analysis Tool  v1.2.1",
+            "CAN Bus Message Analysis Tool  v1.3.0",
         )
 
     def _draw_car(self, painter: QPainter, x: int, y: int):
