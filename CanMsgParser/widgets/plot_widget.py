@@ -58,10 +58,16 @@ HOVER_ZORDER = 20         # 「数据点说明」框层级：图例默认 zorder
 HOVER_OFFSET_PTS = 15     # 说明框相对数据点的初始偏移（points）
 HOVER_FLIP_RATIO = 0.55   # 数据点在绘图区内的相对位置超过该比例时，说明框反向摆放
 
+# ─── 悬停防抖（同一时刻只保留一个说明框，且不在相邻点间来回跳）───
+HOVER_SWITCH_PX = 14      # 切换到相邻数据点所需的最小像素位移（切换滞后阈值）
+HOVER_RELEASE_FACTOR = 1.8  # 离开当前点超过「阈值 × 该系数」才判定为「未命中」，
+                            # 与切换阈值形成滞回：避免在阈值边界上反复开关
+
 # ─── 提示窗（说明框）───
 PIN_ANN_MAX = 3           # 同一条曲线上允许同时存在的「点击固定」提示窗数量
 ANN_EDGE_MARGIN = 6       # 避让时框体距绘图区边界的最小留白（像素）
 ANN_AVOID_SAMPLES = 240   # 遮挡测试时曲线抽稀到的点数（够用且远快于全量）
+ANN_OVERLAP_PAD = 4       # 判定「压到已有提示窗」时向外扩的像素（避免紧贴）
 
 # ─── Ctrl+滚轮缩放 ───
 CTRL_ZOOM_Y_PAD = 0.05    # Ctrl 缩放时 Y 轴上下各留的余量比例，避免曲线紧贴上下边
@@ -181,6 +187,10 @@ class PlotWidget(QWidget):
         self._hover_point = None
         self._hover_ann = None
         self._hover_ax = None
+        # 悬停「切换滞后」状态：锁定当前命中的数据点，鼠标未移出 HOVER_SWITCH_PX
+        # 时不重新搜索，彻底消除相邻采样点之间的来回抖动。
+        self._hover_locked = None      # (line, (x, y))，当前锁定的点
+        self._hover_locked_axes = None  # 该点所属 axes（换子图时立即失效）
         # LTTB 降采样结果缓存：(id(ts), id(vals), n) -> (ts_ds, vals_ds)
         self._ds_cache: dict = {}
         # 悬停路径缓存：避免逐帧重测文本尺寸 / 重算曲线屏幕坐标
@@ -1266,14 +1276,44 @@ class PlotWidget(QWidget):
         else:
             self._remove_highlight()
 
+    def _point_px(self, event, point):
+        """数据点 → 屏幕像素坐标；变换不可用时返回 None。"""
+        try:
+            return event.inaxes.transData.transform(point)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _nearest_point(self, event):
         """返回 (line, (x, y))——鼠标所在 axes 内最近的数据点；无命中返回 None。
 
-        归一化距离阈值与旧实现一致（0.001），判定逻辑不变，仅抽出复用。
+        带**切换滞后**（解决「提示窗在两点间快速抖动」）：
+        ① 若当前已锁定某点，且鼠标仍在它 HOVER_SWITCH_PX 像素内 → 直接沿用该点，
+           完全不重新搜索，鼠标微动不会换点；
+        ② 只有移出该范围才重新找最近点；
+        ③ 判定「未命中」用更宽的 HOVER_RELEASE_FACTOR 倍阈值，形成滞回，
+           避免在阈值边界上反复开关提示窗。
         """
         ax = event.inaxes
         if ax is None or event.xdata is None:
+            self._release_hover_lock()
             return None
+
+        # ── ① 滞后：仍停留在已锁定点附近则直接沿用 ──
+        locked = self._hover_locked
+        if locked is not None and self._hover_locked_axes is ax:
+            l_line, l_point = locked
+            still_visible = l_line in ax.get_lines()
+            if still_visible:
+                mpx = self._point_px(event, l_point)
+                if mpx is not None:
+                    dist_px = ((mpx[0] - event.x) ** 2
+                               + (mpx[1] - event.y) ** 2) ** 0.5
+                    if dist_px <= HOVER_SWITCH_PX:
+                        return l_line, l_point
+            else:
+                self._release_hover_lock()
+
+        # ── ② 重新搜索最近点 ──
         xlim = ax.get_xlim()
         ylim = ax.get_ylim()
         x_range = max(xlim[1] - xlim[0], 1e-10)
@@ -1310,9 +1350,35 @@ class PlotWidget(QWidget):
                     best_line = line
                     best_point = (float(xdata[ci]), float(ydata[ci]))
 
-        if best_dist < 0.001 and best_line is not None:
-            return best_line, best_point
-        return None
+        if best_line is None or best_point is None:
+            self._release_hover_lock()
+            return None
+
+        # ── ③ 命中判定：已锁定时用更宽的滞回阈值 ──
+        limit = 0.001 * (HOVER_RELEASE_FACTOR if self._hover_locked is not None else 1.0)
+        if best_dist >= limit:
+            self._release_hover_lock()
+            return None
+
+        # 换点后做一次像素级确认：与旧点太近则不切换，保持视觉稳定
+        if locked is not None and self._hover_locked_axes is ax:
+            _, l_point = locked
+            old_px = self._point_px(event, l_point)
+            new_px = self._point_px(event, best_point)
+            if old_px is not None and new_px is not None:
+                gap = ((new_px[0] - old_px[0]) ** 2
+                       + (new_px[1] - old_px[1]) ** 2) ** 0.5
+                if gap < HOVER_SWITCH_PX:
+                    return locked[0], l_point
+
+        self._hover_locked = (best_line, best_point)
+        self._hover_locked_axes = ax
+        return best_line, best_point
+
+    def _release_hover_lock(self):
+        """解除悬停锁定（鼠标离开绘图区 / 未命中 / 重绘时调用）。"""
+        self._hover_locked = None
+        self._hover_locked_axes = None
 
     def _apply_highlight(self, line, point, event):
         """高亮曲线并显示注释（含 DBC 值描述）。
@@ -1432,17 +1498,84 @@ class PlotWidget(QWidget):
             ann.arrow_patch.set_color(color)
         except Exception:  # noqa: BLE001
             pass
-        off = self._choose_annotation_offset(ax, x, y, text)
+        # 避让时把**已钉住的固定提示窗**算作障碍：这样「悬停框压住已钉住的
+        # 框」也会被自动化解。exclude 传自身属于保险（悬停框目前不在
+        # _pinned_annotations 内，本就不会被当成障碍）。
+        off = self._choose_annotation_offset(ax, x, y, text,
+                                             exclude=self._hover_ann)
         ann.xytext = off
         ann.set_ha("left")
         ann.set_va("bottom")
 
-    def _choose_annotation_offset(self, ax, x, y, text):
-        """在 4 个候选方位中选「最不碍事」的说明框位置。
+    def _existing_ann_rects(self, ax, exclude=None):
+        """返回该子图上**已有固定提示窗**的像素矩形列表，用于避让打分。
 
-        优先级：① 框体尽量不出绘图区；② 尽量不覆盖任何曲线。
-        若 4 个候选都会覆盖曲线，则退化为「遮挡最少且不出界」的那个
-        —— 即允许覆盖曲线（按需求：没办法避开时也允许覆盖）。
+        exclude：创建时传入「自身」以便更新已有框位置时排除自己，
+        否则框会永远认为自己压着自己，无法移动到最优位置。
+        """
+        rects = []
+        try:
+            renderer = self._canvas.get_renderer()
+        except Exception:  # noqa: BLE001
+            return rects
+        for line, anns in self._pinned_annotations.items():
+            if anns is None:
+                continue
+            for ann in anns:
+                if ann is exclude:
+                    continue
+                if getattr(ann, "axes", None) is not ax:
+                    continue
+                bb = self._ann_box_px(ann, renderer)
+                if bb is None:
+                    continue
+                rects.append(bb)
+        return rects
+
+    @staticmethod
+    def _ann_box_px(ann, renderer):
+        """取说明框的像素矩形 (x0, y0, x1, y1)。
+
+        优先用创建时**自算并存下**的 `ann._px_rect`，理由（均实测）：
+        * `ann.get_window_extent()` 是「文本框+箭头」的联合 bbox，
+          相邻两点的箭头指向同一片区域 → 任意两框恒判重叠 94.9%，避让失效；
+        * `ann.get_bbox_patch().get_window_extent()` 虽为纯框体，但在 figure
+          未 draw() 时返回 (-0.4,-0.4,1.8,1.8)；而钉窗走 draw_idle()，
+          连续钉窗时上一框尚未绘制 → 读到垃圾值，避让同样失效（重叠 89%）。
+        自算矩形与绘制状态无关，也不含箭头。
+        渲染器/旧对象缺失 `_px_rect` 时按旧法兜底（至少不会漏掉障碍）。
+        """
+        rect = getattr(ann, "_px_rect", None)
+        if rect is not None:
+            return rect
+        try:
+            bb = ann.get_window_extent(renderer)
+        except Exception:  # noqa: BLE001
+            return None
+        return (bb.x0, bb.y0, bb.x1, bb.y1)
+
+    @staticmethod
+    def _overlap_area(rect, others, pad):
+        """当前框与一组矩形的重叠面积（各方向外扩 pad 像素）。"""
+        if not others:
+            return 0.0
+        bx0, by0, bx1, by1 = rect
+        total = 0.0
+        for ox0, oy0, ox1, oy1 in others:
+            ix = min(bx1, ox1 + pad) - max(bx0, ox0 - pad)
+            iy = min(by1, oy1 + pad) - max(by0, oy0 - pad)
+            if ix > 0 and iy > 0:
+                total += ix * iy
+        return total
+
+    def _choose_annotation_offset(self, ax, x, y, text, exclude=None):
+        """在候选方位中选「最不碍事」的说明框位置。
+
+        优先级（字典序）：① 框体尽量不出绘图区；
+        ② 尽量不压到**已有的固定提示窗**（解决「点得近时两个框重叠」）；
+        ③ 尽量不覆盖任何曲线。
+        若所有候选都无法兼顾，则退化为遮挡最少且不出界的那个
+        —— 按需求：没办法避开时也允许覆盖曲线。
         """
         try:
             px, py = ax.transData.transform((x, y))
@@ -1452,16 +1585,20 @@ class PlotWidget(QWidget):
 
         bw, bh = self._measure_text_px(ax, text)
         pad = HOVER_OFFSET_PTS
-        # 4 个候选：右下、左下、右上、左上（相对数据点的 offset，point 单位）
+        # 4 个角落方位 + 2 个「垂直拉开」方位：
+        # 数据点密集时，同一角落的框必然重叠，靠上下拉开才能错开。
         cands = [
             (pad, pad), (-bw - pad, pad),
             (pad, -bh - pad), (-bw - pad, -bh - pad),
+            (pad, -(2.0 * bh + pad)), (-bw - pad, 2.0 * bh + pad),
+            (pad, 2.0 * bh + pad), (-bw - pad, -(2.0 * bh + pad)),
         ]
-        # 先做原来那套「贴边翻转」，保证首个候选就是历史最自然的位置
+        # 先做「贴边翻转」，保证首个候选就是历史最自然的位置
         cands[0] = self._flip_offset_at_edge(ax, x, y, cands[0])
 
         margin = ANN_EDGE_MARGIN
         curves = self._visible_curve_pixels(ax)
+        existing = self._existing_ann_rects(ax, exclude=exclude)
         best, best_key = cands[0], None
         for ox, oy in cands:
             bx0, by0 = px + ox, py + oy
@@ -1472,10 +1609,17 @@ class PlotWidget(QWidget):
                        + max(0.0, axb.y0 + margin - by0)
                        + max(0.0, by1 - (axb.y1 - margin)))
             hits = self._count_curve_hits(curves, bx0, by0, bx1, by1)
-            key = (round(outside, 1), hits)
+            ovl = self._overlap_area((bx0, by0, bx1, by1), existing,
+                                     ANN_OVERLAP_PAD)
+            # 优先级：不出界 > 不压已有框 > 不压曲线。
+            # ⚠️ ovl 必须排在 hits **之前**：若把「压曲线」提前，则
+            #   (不压框但压 6 个曲线点) 会输给 (压住已有框但压 0 个曲线点)，
+            #   两个相近的框会双双跑到同一角落、几乎完全重合（实测 88%）。
+            #   用户明确要求「不能重叠」，而「实在避不开时压曲线」可接受。
+            key = (round(outside, 1), 1 if ovl > 0.0 else 0, hits)
             if best_key is None or key < best_key:
                 best, best_key = (ox, oy), key
-            if outside == 0.0 and hits == 0:
+            if outside == 0.0 and hits == 0 and ovl == 0.0:
                 break                      # 已经完美，无需再试
         return best
 
@@ -1493,12 +1637,20 @@ class PlotWidget(QWidget):
             return cached
         try:
             renderer = self._canvas.get_renderer()
+            # ⚠️ 锚点必须取在**绘图区中心**（数据坐标下的中点）：
+            # 旧实现锚在数据坐标 (0,0)，该点常紧贴绘图区左/下边缘，
+            # 测得的 bbox 会被边界压缩 —— 实测 76.0 x 41.8，而真值 91.1 x 57.6，
+            # 低估 17%/27%，使避让打分整体偏小、误判为「不重叠」。
+            xm = (ax.get_xlim()[0] + ax.get_xlim()[1]) / 2.0
+            ym = (ax.get_ylim()[0] + ax.get_ylim()[1]) / 2.0
             ann = ax.annotate(
-                text, xy=(0, 0), xytext=(0, 0), textcoords="offset points",
+                text, xy=(xm, ym), xytext=(0, 0), textcoords="offset points",
                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#252535",
                           edgecolor="#4fc3f7"),
                 fontsize=9, color="#e0e0e0",
             )
+            # 与 _ann_box_px 保持同一口径（get_window_extent），
+            # 否则候选框估算位置与已有框实际位置尺度不一致、重叠打分失真。
             bb = ann.get_window_extent(renderer)
             ann.remove()
             size = (float(bb.width), float(bb.height))
@@ -1577,8 +1729,9 @@ class PlotWidget(QWidget):
     def _ann_index_at(self, event):
         """返回被点击位置命中的固定注释框 (line, 序号)；未命中返回 (None, -1)。
 
-        用于「右键关闭某一个提示窗」——必须能判定点到了哪一个框，
-        故需遍历所有固定注释框，按外扩 ANN_ANCHOR_MARGIN 的矩形做命中测试。
+        用于「左键/右键关闭某一个提示窗」——必须能判定点到了哪一个框，
+        故需遍历所有固定注释框，按**纯框体**矩形（不含箭头，见 _ann_box_px）
+        做命中测试；命中多个时取面积最小的那个。
         """
         if event.x is None or event.y is None:
             return None, -1
@@ -1592,12 +1745,14 @@ class PlotWidget(QWidget):
             if anns is None:
                 continue
             for i, ann in enumerate(anns):
-                try:
-                    bb = ann.get_window_extent(renderer)
-                except Exception:  # noqa: BLE001
+                # 用自算矩形：get_window_extent 的联合 bbox 含箭头，
+                # 会把「箭头下方一大片空白」也算成命中区，点空白即误关窗。
+                rect = self._ann_box_px(ann, renderer)
+                if rect is None:
                     continue
-                if (bb.x0 <= ex <= bb.x1) and (bb.y0 <= ey <= bb.y1):
-                    area = bb.width * bb.height
+                bx0, by0, bx1, by1 = rect
+                if (bx0 <= ex <= bx1) and (by0 <= ey <= by1):
+                    area = (bx1 - bx0) * (by1 - by0)
                     if best_area is None or area < best_area:
                         best, best_area = (line, i), area
         return best
@@ -1613,6 +1768,8 @@ class PlotWidget(QWidget):
            故显式抬到 HOVER_ZORDER(20)。
         """
         if offset is None:
+            # 先按「不考虑已有框」的方位建出来，拿到 artist 之后再用 exclude=自身
+            # 重算一次方位 —— 此时它才能把自己从障碍集合里排除、把其它框算进去。
             off = self._choose_annotation_offset(ax, x, y, text)
         else:
             off = offset
@@ -1626,7 +1783,35 @@ class PlotWidget(QWidget):
             zorder=HOVER_ZORDER,
         )
         self._ensure_ann_inside(ann, ax)
+        if offset is None:
+            # 二次定方位：避开已有固定框（避免「点得近时两个框重叠」）。
+            off2 = self._choose_annotation_offset(ax, x, y, text, exclude=ann)
+            if off2 != off:
+                ann.set_position(off2)
+                self._ensure_ann_inside(ann, ax)
+        # 记下**自算**的框体像素矩形：后续避让打分 / 命中测试都用它，
+        # 以免依赖 artist 的绘制状态（详见 _ann_box_px 的说明）。
+        self._store_ann_px_rect(ann, ax)
         return ann
+
+    def _store_ann_px_rect(self, ann, ax):
+        """按「锚点像素 + offset(points→px) + 文本实测尺寸」自算框体矩形并缓存。
+
+        实测与真实 patch 的误差约 5~8px（annotate 默认 va='baseline' 所致），
+        对于「两个框是否压在一起」的打分完全够用。
+        """
+        try:
+            canvas = self._canvas
+            k = 72.0 / (float(canvas.figure.dpi) or 100.0)   # points → px
+            ox, oy = ann.get_position()
+            x, y = ann.xy
+            px, py = ax.transData.transform((x, y))
+            bw, bh = self._measure_text_px(ax, ann.get_text())
+            x0 = px + ox / k
+            y0 = py + oy / k
+            ann._px_rect = (x0, y0, x0 + bw, y0 + bh)
+        except Exception:  # noqa: BLE001
+            ann._px_rect = None
 
     def _ensure_ann_inside(self, ann, ax):
         """按实测框体尺寸把说明框夹回绘图区内（渲染器不可用时跳过）。
@@ -1639,6 +1824,10 @@ class PlotWidget(QWidget):
         canvas = getattr(self, "_canvas", None)
         try:
             renderer = canvas.get_renderer()
+            # ⚠️ 这里必须用 ann.get_window_extent()，不能用 bbox_patch：
+            # 本方法在 figure draw() **之前**被调用，此时 bbox_patch 尚未
+            # 布局，会返回 (-0.4,-0.4,1.8,1.8) 垃圾值，进而算出巨大的位移
+            # 把提示框推到绘图区角落（已实测踩坑）。
             bb = ann.get_window_extent(renderer)
         except Exception:  # noqa: BLE001
             return
@@ -1664,6 +1853,12 @@ class PlotWidget(QWidget):
             ann.set_position((ox + dx * k, oy + dy * k))
         except Exception:  # noqa: BLE001
             pass
+        else:
+            # 位置变了 → 自算矩形同步刷新，否则后续避让仍按旧位置打分。
+            if getattr(ann, "_px_rect", None) is not None:
+                ax_ = getattr(ann, "axes", None)
+                if ax_ is not None:
+                    self._store_ann_px_rect(ann, ax_)
 
     def _clamp_annotation_to_axes(self, ann, ax):
         """向后兼容：等价于 _ensure_ann_inside。"""
@@ -1792,6 +1987,7 @@ class PlotWidget(QWidget):
         - 左键按住并拖动 → 实时平移（拖动中动态显示）；
         - 左键按下后位移 < PAN_CLICK_PX → 视为单击，钉住该点提示窗；
         - 左键按在已有标记线附近 → 拖动该标记线；
+        - **左键点在某个固定提示窗上 → 关闭该提示窗**（与右键等价）；
         - 右键点在某个固定提示窗上 → 关闭该提示窗；否则清空所有标记。
         """
         if event.inaxes is None or event.xdata is None:
@@ -1799,6 +1995,17 @@ class PlotWidget(QWidget):
             if event.button == 3:
                 self._clear_marks()
             return
+
+        # 左键点在已有固定提示窗上：关闭它（与右键等价）。
+        # 必须放在**所有左键分支之前** —— 否则会被当作平移起点，
+        # release 时位移不足又被当成单击、在框上再钉一个新窗（越点越多）。
+        # 悬停窗不在此列：它是复用 artist，鼠标移出即自动收起，无需手动关闭。
+        if event.button == 1:
+            line, ai = self._ann_index_at(event)
+            if line is not None and self._close_pinned_ann(line, ai):
+                # 关窗后鼠标仍停在原处，避免立刻又触发悬停判定
+                self._remove_highlight()
+                return
 
         # 左键按在已有标记线附近：进入拖动（不依赖标记模式，放置完也能继续微调）
         if event.button == 1:
