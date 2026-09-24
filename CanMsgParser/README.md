@@ -17,6 +17,14 @@
   （不按 Ctrl 时保持原有滚轮行为）；③ 点击曲线弹出的数值说明框现按「不压曲线、不出界」
   优先自动避让，每条曲线最多同时显示 **3 个**，**右键说明框可关闭**；④ 修复曲线图
   重绘后固定提示窗残留、信号名映射表逐轮膨胀（悬垂引用）导致的固定高亮静默失效。
+  **悬停交互修复（同日补充）**：① 鼠标微动时提示窗**不停闪烁**（坐标文本与提示窗各自
+  局部刷新、互相擦除 → 合并为同一次刷新，且命中点未变时整帧跳过）；② 鼠标离开曲线后
+  曲线上残留**小箭头**（文本置空后 matplotlib 仍绘制箭头 → 改为整体隐藏）；③ 沿曲线
+  滑动时**第一个提示窗永不消失**（捕获背景位图前未隐藏临时图层，被烙进背景后每次局部
+  刷新都贴回）；④ 点击钉住的点与悬停窗显示的**不是同一个点**（两处选点规则不一致 →
+  统一为同一套归一化最近点度量）；⑤ 同一个点会**叠出多个**提示窗；⑥ 有固定窗的曲线
+  其它数据点**无法再悬停**（整条屏蔽改为**按点去重**）；⑦ 工具栏新增 **「清除提示窗」**，
+  一键清空全部固定提示窗并复原曲线线宽。
 - **v1.2.1**：新增 **ASC(.asc) 日志加载与录制支持**（自带 ASC 解析器，取代 python-can
   的 `ASCReader`，修复加载 `.asc` 报 `telling position disabled by next() call` 直接失败、
   以及其吞掉文件首帧导致的时间原点右移；实时报文页工具栏新增「录制格式」下拉，可选
@@ -234,8 +242,8 @@ python build.py
 
 产物为 `installer/output/CanMsgParser_Setup_<版本>.exe`。
 
-- `installer/installer.iss` 与产物 `installer/output/CanMsgParser_Setup_<版本>.exe`
-  **均纳入版本管理**——与 `dist/` 一致，安装包随版本一起提交，`.gitignore` 不做忽略。
+- `installer/installer.iss` 纳入版本管理；产物 `installer/output/CanMsgParser_Setup_<版本>.exe`
+  与 `dist/` 一样**不入库**（`.gitignore` 已忽略），改由 GitHub Release 的附件下发。
 - 版本号在 `installer.iss` 的 `MyAppVersion` 定义，需与 `main_window.py` 窗口标题 /
   关于对话框、`widgets/splash_screen.py`、本 README 标题**四处保持一致**。
 - 用户级安装（`PrivilegesRequired=lowest` + `DefaultDirName={localappdata}`），全程
