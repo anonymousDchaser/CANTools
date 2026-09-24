@@ -1,10 +1,13 @@
 # tests/test_plot_hover_opt.py
 """曲线图悬停优化（v1.3.x）offscreen 回归测试。
 
-覆盖三项用户需求：
+覆盖的用户需求：
 1）悬停提示窗只有一个、且不在相邻两点间抖动 → 切换滞后（HOVER_SWITCH_PX）；
 2）点得近时两个固定提示窗不重叠 → 候选方位排入「遮挡打分」；
-3）左键点到固定提示窗也能关闭（与右键等价）。
+3）左键点到固定提示窗也能关闭（与右键等价）；
+4）同一数据点上鼠标微动不重绘提示窗（状态幂等，治「一直闪」）；
+5）每次 blit 都必须带上悬停提示窗（否则坐标文本与提示窗互相擦除 → 闪烁）；
+6）离开曲线后提示窗含箭头整体隐藏（治「残留小箭头」）。
 """
 import os
 import sys
@@ -209,6 +212,135 @@ def test_right_click_close_still_works():
     w.close()
 
 
+def test_hover_idempotent_no_redraw():
+    """鼠标微动但未换点时，不得重建/重设提示窗（否则视觉上会"闪"）。
+
+    用户原话：「只要鼠标移动一点点就不断地在鼠标附近位置的点一直闪悬浮窗，
+    是不是鼠标没有移动到其他对应点上时，不重新绘制悬浮窗」。
+    """
+    print("[6] 同一点微动时不重绘提示窗（幂等）...")
+    w, ax, line, x, y = _mk_widget(n=1200)
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+
+    calls = {"apply": 0, "choose": 0}
+
+    def _wrap(name):
+        orig = getattr(PlotWidget, name)
+
+        def _inner(self, *a, **kw):
+            calls["apply" if name == "_apply_highlight" else "choose"] += 1
+            return orig(self, *a, **kw)
+        return _inner
+
+    # 线宽同样幂等：已加粗的曲线不再重复 set_linewidth（用户原话：
+    # 「曲线加粗显示的也是，如果已经处于加粗显示的状态……就不用重新刷新」）
+    calls["lw"] = 0
+    orig_lw = line.set_linewidth
+
+    def _spy_lw(v):
+        calls["lw"] += 1
+        return orig_lw(v)
+
+    orig_apply = PlotWidget._apply_highlight
+    orig_choose = PlotWidget._choose_annotation_offset
+    PlotWidget._apply_highlight = _wrap("_apply_highlight")
+    PlotWidget._choose_annotation_offset = _wrap("_choose_annotation_offset")
+    line.set_linewidth = _spy_lw
+    try:
+        i = 600
+        px, py = ax.transData.transform((float(x[i]), float(y[i])))
+        for k in range(30):                      # 沿法向 ±0.4px 抖动
+            dy = 0.4 * ((k % 3) - 1)
+            w._on_mouse_move(_Ev(px, py + dy, float(x[i]), float(y[i]), ax))
+    finally:
+        PlotWidget._apply_highlight = orig_apply
+        PlotWidget._choose_annotation_offset = orig_choose
+        line.set_linewidth = orig_lw
+
+    assert calls["apply"] == 1, f"同一点微动应只高亮 1 次, got={calls['apply']}"
+    assert calls["choose"] == 1, \
+        f"同一点微动不应重算避让, got={calls['choose']}"
+    assert calls["lw"] == 1, \
+        f"同一曲线已加粗后不应重复 set_linewidth, got={calls['lw']}"
+    print(f"    30 帧微动 → _apply_highlight={calls['apply']}, "
+          f"_choose_annotation_offset={calls['choose']}, "
+          f"set_linewidth={calls['lw']}")
+    w.close()
+
+
+def test_blit_always_carries_hover_ann():
+    """每次局部刷新都必须把悬停提示窗一并重画，否则会互相擦除（闪烁）。
+
+    根因回顾：blit 是「restore 背景位图 → 只画给定 artist」，坐标文本那次
+    blit 会把提示窗抹掉、提示窗那次又把坐标文本抹掉 → 鼠标一动就闪。
+    """
+    print("[7] blit 不得把提示窗擦掉（防闪烁回归）...")
+    w, ax, line, x, y = _mk_widget(n=1200)
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+
+    seen = {"blit": 0, "with_ann": 0}
+    orig_blit = PlotWidget._blit_artists
+
+    def _spy(self, artists):
+        lst = list(artists)
+        merged = lst + [a for a in self._persistent_blit_artists()
+                        if a not in lst]
+        seen["blit"] += 1
+        if self._hover_ann is not None and self._hover_ann in merged:
+            seen["with_ann"] += 1
+        return orig_blit(self, artists)
+
+    PlotWidget._blit_artists = _spy
+    try:
+        i = 600
+        px, py = ax.transData.transform((float(x[i]), float(y[i])))
+        for k in range(20):
+            w._on_mouse_move(_Ev(px + (k % 3), py, float(x[i]), float(y[i]), ax))
+    finally:
+        PlotWidget._blit_artists = orig_blit
+
+    assert seen["blit"] > 0, "应有 blit 发生"
+    assert seen["with_ann"] == seen["blit"], (
+        f"{seen['blit'] - seen['with_ann']} 次 blit 未带提示窗 → 会被擦掉")
+    print(f"    {seen['blit']} 次 blit 全部带上提示窗")
+    w.close()
+
+
+def test_hover_ann_hidden_after_leave():
+    """鼠标离开曲线后，提示窗（含箭头）必须整体隐藏，不留残影。
+
+    用户原话：「如果我鼠标已经离开曲线了，曲线点上还残留一个小箭头」。
+    只 set_text("") 是不够的：文本为空时 matplotlib 仍会画 arrow_patch。
+    """
+    print("[8] 离开曲线后不残留箭头 ...")
+    w, ax, line, x, y = _mk_widget(n=1200)
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+
+    i = 600
+    px, py = ax.transData.transform((float(x[i]), float(y[i])))
+    w._on_mouse_move(_Ev(px, py, float(x[i]), float(y[i]), ax))
+    assert w._hover_ann.get_visible(), "悬停中提示窗应可见"
+    assert w._hover_ann in w._persistent_blit_artists()
+
+    yr = ax.get_ylim()[1] - ax.get_ylim()[0]
+    w._on_mouse_move(_Ev(px, py + 250, float(x[i]),
+                         float(y[i]) + yr * 0.35, ax))
+    assert not w._hover_ann.get_visible(), "离开后提示窗必须整体隐藏（含箭头）"
+    assert w._hover_ann not in w._persistent_blit_artists(), \
+        "隐藏后不应再参与 blit（否则箭头会被画回来）"
+    # set_data([], []) 后 get_xdata() 返回的是 list（不是 ndarray），故用 len()
+    assert len(w._hover_point.get_xdata()) == 0, "高亮点数据应清空"
+
+    # 重新悬停回来应能恢复可见
+    w._on_mouse_move(_Ev(px, py, float(x[i]), float(y[i]), ax))
+    assert w._hover_ann.get_visible(), "重新命中后应恢复可见"
+    print("    OK: 离开隐藏 / 回来恢复")
+    w.close()
+
+
 if __name__ == "__main__":
     test_hover_hysteresis_no_jitter()
     test_pinned_annotations_do_not_overlap()
@@ -216,4 +348,7 @@ if __name__ == "__main__":
     test_left_click_closes_pinned_ann()
     test_left_click_empty_still_pins()
     test_right_click_close_still_works()
+    test_hover_idempotent_no_redraw()
+    test_blit_always_carries_hover_ann()
+    test_hover_ann_hidden_after_leave()
     print("\nALL PASS")

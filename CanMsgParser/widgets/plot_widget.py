@@ -191,6 +191,10 @@ class PlotWidget(QWidget):
         # 时不重新搜索，彻底消除相邻采样点之间的来回抖动。
         self._hover_locked = None      # (line, (x, y))，当前锁定的点
         self._hover_locked_axes = None  # 该点所属 axes（换子图时立即失效）
+        # 悬停「已绘制状态」：(id(line), x, y)，表示屏幕上当前正显示的悬停点。
+        # 与它相同则整帧跳过（不重算避让、不重设文本、不重绘）——既省开销，也
+        # 杜绝「鼠标微动 → 提示窗被反复擦除/重画」造成的可见抖动。
+        self._hover_state = None
         # LTTB 降采样结果缓存：(id(ts), id(vals), n) -> (ts_ds, vals_ds)
         self._ds_cache: dict = {}
         # 悬停路径缓存：避免逐帧重测文本尺寸 / 重算曲线屏幕坐标
@@ -394,8 +398,16 @@ class PlotWidget(QWidget):
             if self._bg_cache is None:
                 self._canvas.draw_idle()
                 return
+            # restore_region 会把「上一次 blit 画上去的内容」整块抹掉，所以本次
+            # 必须把**所有常驻 blit 图层**（坐标文本 / 悬停高亮点 / 提示窗）一并
+            # 画回。否则不同调用路径会互相擦除：坐标文本那一次把提示窗擦掉、
+            # 提示窗那一次又把坐标文本擦掉 → 表现为「悬停框每帧闪一下」。
+            merged = list(artists)
+            for art in self._persistent_blit_artists():
+                if art not in merged:
+                    merged.append(art)
             self._canvas.restore_region(self._bg_cache)
-            for art in artists:
+            for art in merged:
                 if art is None:
                     continue
                 ax = getattr(art, "axes", None)
@@ -410,6 +422,27 @@ class PlotWidget(QWidget):
             # 任何 blit 异常都退化为常规重绘，保证功能不坏
             self._invalidate_bg_cache()
             self._canvas.draw_idle()
+
+    def _persistent_blit_artists(self) -> list:
+        """返回「必须常驻屏幕」的 blit artist：坐标文本 + 悬停高亮点 / 提示窗。
+
+        blit 的机制是「恢复整块背景位图 → 只重画给定 artist → 贴回」，所以
+        每一次局部刷新都必须把它们带上重画，否则会被背景位图抹掉 —— 这正是
+        「坐标文本与提示窗互相擦除、鼠标一动提示窗就闪」的根因。
+        """
+        arts = []
+        fig = getattr(self, "_fig", None)
+        if fig is None:
+            return arts
+        for ax in fig.axes:
+            txt = self._coord_texts.get(id(ax))
+            if txt is not None and txt.get_visible():
+                arts.append(txt)
+        if self._hover_ann is not None and self._hover_ann.get_visible():
+            if self._hover_point is not None:
+                arts.append(self._hover_point)
+            arts.append(self._hover_ann)
+        return arts
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -481,6 +514,12 @@ class PlotWidget(QWidget):
         self._highlighted_line = None
         self._annotation = None
         self._coord_texts.clear()
+        # fig.clear() 同样销毁了悬停高亮点 / 提示窗 artist：必须一并丢弃引用，
+        # 否则 _persistent_blit_artists 会拿旧 artist 去 draw（画在游离 axes 上），
+        # 且 _hover_state / 锁定点残留会让重绘后鼠标不动时不再重新显示提示窗。
+        self._discard_hover_artists()
+        self._release_hover_lock()
+        self._hover_state = None
         self._invalidate_bg_cache()
         # line -> sig_name 映射：各 _draw_* / _build_realtime 内还会再 clear 一次
         # （它们可能被单独调用），这里统一先清，保证任何重绘分支都不残留旧 artist 键。
@@ -1254,27 +1293,47 @@ class PlotWidget(QWidget):
                     self._snap_time(event.xdata, event.inaxes))
             return
 
-        # 悬停命中 + 坐标文本：一次 blit 同时刷新两者
-        self._update_coord_text(event)
-        self._hover_probe(event)
+        # 悬停命中 + 坐标文本：**合并为一次 blit** 输出。
+        # 原先两者各自 blit：坐标文本那次 restore 会把提示窗擦掉、提示窗那次
+        # 又把坐标文本擦掉，且各自触发一次 widget 重绘 → 鼠标一动提示窗就闪。
+        artists = self._update_coord_text(event)
+        artists.extend(self._hover_probe(event))
+        if artists:
+            self._blit_artists(artists)
 
-    def _update_coord_text(self, event):
-        """更新当前 axes 左下角的实时坐标文本（blit 局部刷新）。"""
+    def _update_coord_text(self, event) -> list:
+        """更新当前 axes 左下角的实时坐标文本；返回待重绘 artist（不自行 blit）。
+
+        这里**不能 blit**：blit 会 restore 整块背景位图，把上一次画上去的悬停
+        提示窗一并抹掉；反过来悬停那次 blit 又会抹掉坐标文本。统一交给
+        _on_mouse_move 合并成一次输出，才能既不闪烁又不重复重绘。
+        """
         ax_id = id(event.inaxes)
         txt = self._coord_texts.get(ax_id)
         if txt is None or event.xdata is None or event.ydata is None:
-            return
+            return []
         txt.set_text(f"x={event.xdata:.4f}  y={event.ydata:.4f}")
-        self._blit_artists([txt])
+        return [txt]
 
-    def _hover_probe(self, event):
-        """在鼠标所在 axes 中找最近曲线点，命中则高亮 + 提示窗。"""
+    def _hover_probe(self, event) -> list:
+        """在鼠标所在 axes 中找最近曲线点，命中则高亮 + 提示窗。
+
+        **状态幂等**：命中的仍是同一个数据点时直接返回，不重算避让、不重设
+        文本、不重绘 —— 用户视角就是「鼠标微动但没换点，提示窗纹丝不动」。
+
+        返回待重绘 artist 列表（不自行 blit，由调用方合并输出）。
+        """
         nearest = self._nearest_point(event)
-        if nearest is not None:
-            line, point = nearest
-            self._apply_highlight(line, point, event)
-        else:
-            self._remove_highlight()
+        if nearest is None:
+            if self._hover_state is None:
+                return []                  # 本来就没有提示窗，无需重绘
+            return self._remove_highlight(blit=False)
+        line, point = nearest
+        state = (id(line), round(float(point[0]), 9), round(float(point[1]), 9))
+        if state == self._hover_state:
+            return []                      # 命中点未变：整帧跳过
+        self._hover_state = state
+        return self._apply_highlight(line, point, event, blit=False)
 
     def _point_px(self, event, point):
         """数据点 → 屏幕像素坐标；变换不可用时返回 None。"""
@@ -1380,11 +1439,12 @@ class PlotWidget(QWidget):
         self._hover_locked = None
         self._hover_locked_axes = None
 
-    def _apply_highlight(self, line, point, event):
-        """高亮曲线并显示注释（含 DBC 值描述）。
+    def _apply_highlight(self, line, point, event, blit: bool = True) -> list:
+        """高亮曲线并显示注释（含 DBC 值描述）；返回待重绘的 artist 列表。
 
         性能：不再每帧 remove + annotate 重建 artist，而是「复用同一组 artist +
         blit 局部刷新」。实测每帧由 236 ms 降至约 5 ms。
+        blit=False 时只改 artist 状态，由调用方把所有 artist 合并成一次 blit。
         """
         # 恢复之前的线宽（仅对非固定曲线）
         prev = self._highlighted_line
@@ -1392,8 +1452,11 @@ class PlotWidget(QWidget):
                 and prev not in self._pinned_lines):
             prev.set_linewidth(self._original_linewidth)
 
-        line.set_linewidth(4)
-        self._highlighted_line = line
+        # 已经加粗的曲线不重复 set_linewidth：该调用会标脏 artist，而线宽变更
+        # 属于「背景变化」（见下方 _invalidate_bg_cache 分支），重复触发纯属浪费。
+        if line is not self._highlighted_line:
+            line.set_linewidth(4)
+            self._highlighted_line = line
 
         ax = line.axes
         label = line.get_label()
@@ -1422,7 +1485,9 @@ class PlotWidget(QWidget):
         artists.extend([self._hover_point, self._hover_ann])
 
         self._annotation = self._hover_ann
-        self._blit_artists(artists)
+        if blit:
+            self._blit_artists(artists)
+        return artists
 
     def _build_point_text(self, line, x, y, label) -> str:
         """组装「数据点说明」框文本（含 DBC 值描述）。"""
@@ -1481,6 +1546,7 @@ class PlotWidget(QWidget):
         self._hover_point = None
         self._hover_ann = None
         self._hover_ax = None
+        self._hover_state = None
         if self._annotation is not None and self._annotation is not None:
             # _annotation 可能指向已销毁的悬停框或固定框，这里不强清，
             # 由各自的创建/移除路径负责；仅在它等于被销毁的悬停框时置空。
@@ -1491,6 +1557,9 @@ class PlotWidget(QWidget):
         ann = self._hover_ann
         ann.xy = (x, y)
         ann.set_text(text)
+        if not ann.get_visible():
+            # _remove_highlight 会把整框（含箭头）隐藏，重新命中时要恢复可见
+            ann.set_visible(True)
         bb = ann.get_bbox_patch()
         if bb is not None:
             bb.set_edgecolor(color)
@@ -1881,8 +1950,16 @@ class PlotWidget(QWidget):
             oy = -oy
         return (ox, oy)
 
-    def _remove_highlight(self):
-        """移除高亮和注释（blit 局部刷新，不整幅重绘）"""
+    def _remove_highlight(self, blit: bool = True) -> list:
+        """移除高亮和注释；返回待重绘的 artist 列表。
+
+        提示窗必须**整体 set_visible(False)**，不能只把文本置空：文本为空时
+        matplotlib 仍会绘制 arrow_patch（箭头依旧指向上次的数据点），于是鼠标
+        离开曲线后会在曲线上残留一小截箭头。
+
+        blit=False 时只改状态，由调用方合并成一次 blit（多次 blit 会互相
+        restore 擦除）。状态本就没变化时不重绘 —— 幂等。
+        """
         had = False
         if self._highlighted_line is not None:
             self._highlighted_line.set_linewidth(self._original_linewidth)
@@ -1890,13 +1967,21 @@ class PlotWidget(QWidget):
             self._invalidate_bg_cache()
             self._highlighted_line = None
             had = True
-        if self._hover_ann is not None:
+        artists = []
+        if self._hover_ann is not None and self._hover_ann.get_visible():
+            self._hover_ann.set_visible(False)
             self._hover_ann.set_text("")
             self._hover_point.set_data([], [])
             self._annotation = None
+            artists = [self._hover_point, self._hover_ann]
             had = True
-        if had:
-            self._blit_artists([self._hover_point, self._hover_ann])
+        self._hover_state = None
+        if had and blit:
+            # 传 [None, None] 也算「有 artist」，可确保 _blit_artists 内部仍会
+            # 补画常驻图层，并把恢复后的线宽贴回画面。
+            self._blit_artists(artists if artists
+                               else [self._hover_point, self._hover_ann])
+        return artists
 
     def _on_scroll(self, event):
         """滚轮缩放。
