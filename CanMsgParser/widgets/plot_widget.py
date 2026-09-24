@@ -272,6 +272,15 @@ class PlotWidget(QWidget):
         self._clear_mark_btn.clicked.connect(self._clear_marks)
         toolbar.addWidget(self._clear_mark_btn)
 
+        self._clear_pin_btn = QPushButton("清除提示窗")
+        self._clear_pin_btn.setToolTip(
+            "清除所有已固定的数据点提示窗（点击曲线钉下来的那些框）：\n"
+            "· 只想关掉某一个时，直接左键或右键点那个框即可\n"
+            "· 曲线还有其它固定窗时保持加粗，全部清除后线宽自动恢复"
+        )
+        self._clear_pin_btn.clicked.connect(self._clear_pinned_annotations)
+        toolbar.addWidget(self._clear_pin_btn)
+
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
@@ -1001,6 +1010,36 @@ class PlotWidget(QWidget):
                     except Exception:  # noqa: BLE001
                         pass
         self._update_mark_btn_text()
+        self._invalidate_bg_cache()
+        self._canvas.draw_idle()
+
+    def _clear_pinned_annotations(self):
+        """清除**所有**已固定的数据点提示窗（「清除提示窗」按钮）。
+
+        与 `_close_pinned_ann`（只关某一个）的区别：这里一次清空全部曲线上的
+        固定窗。必须连带把曲线线宽恢复原值 —— 加粗是「有固定窗」的视觉标记，
+        窗没了还留着粗线就成了误导。
+
+        先走一次 `_remove_highlight(blit=False)` 收起悬停窗：否则鼠标此刻正
+        悬停在某点时，`_hover_state` 仍是那个点，后续 mouse move 会因「状态
+        幂等」直接跳过，悬停窗留在原地却不再有高亮线宽，状态自相矛盾。
+        """
+        self._remove_highlight(blit=False)
+        lines = list(self._pinned_lines)
+        for anns in list(self._pinned_annotations.values()):
+            for ann in anns or []:
+                try:
+                    ann.remove()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._pinned_annotations.clear()
+        self._pinned_lines.clear()
+        for line in lines:
+            try:
+                line.set_linewidth(self._original_linewidth)
+            except Exception:  # noqa: BLE001
+                pass
+        # 线宽恢复属于背景变化 → 缓存失效后整幅重绘一次
         self._invalidate_bg_cache()
         self._canvas.draw_idle()
 

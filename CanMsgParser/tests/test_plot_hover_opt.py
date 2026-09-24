@@ -13,7 +13,8 @@
 8）点击钉住的数据点必须与悬停窗显示的是同一个点（治「窗在 A、点下去钉在 B」）；
 9）同一个点只保留一个提示窗（悬停窗不叠加、重复点击不堆窗）；
 10）曲线已有固定窗时，**其它**数据点仍可悬停（按点去重，不是整条曲线屏蔽），
-   且悬停这条曲线期间离开不得把固定态的加粗线宽打回原始值。
+   且悬停这条曲线期间离开不得把固定态的加粗线宽打回原始值；
+11）工具栏「清除提示窗」按钮一次清空所有固定窗，并恢复曲线线宽（不留「无窗却加粗」）。
 """
 import os
 import sys
@@ -706,6 +707,68 @@ def test_hover_dedup_on_pinned_point():
     w.close()
 
 
+def test_clear_all_pinned_annotations():
+    """「清除提示窗」按钮：一次清空全部固定窗，并把曲线线宽恢复原值。
+
+    加粗是「该曲线有固定窗」的视觉标记，窗没了还留着粗线就是误导 —— 所以
+    清除必须连带恢复线宽（否则出现「无窗却加粗」的曲线）。
+    """
+    print("[17] 清除全部固定窗（按钮）...")
+    w, ax, line, x, y = _mk_sparse()
+    for i in (10, 30):
+        p = ax.transData.transform((float(x[i]), float(y[i])))
+        w._on_mouse_move(_ev_at_px(p[0], p[1], ax))
+        w._on_click(_ev_at_px(p[0], p[1], ax))
+        w._on_release(_ev_at_px(p[0], p[1], ax))
+    assert len(w._pinned_annotations.get(line, [])) == 2, "应钉出 2 个固定窗"
+    assert line in w._pinned_lines and line.get_linewidth() == 4.0
+    assert w._clear_pin_btn.text() == "清除提示窗", "按钮文本应保持不变"
+    # 按钮确实接到了清除方法上
+    assert w._clear_pin_btn.receivers(w._clear_pin_btn.clicked) > 0, \
+        "「清除提示窗」按钮应已连接点击处理"
+
+    w._clear_pinned_annotations()
+    assert w._pinned_annotations == {}, "应清空所有固定窗"
+    assert w._pinned_lines == set(), "应清空固定曲线集合"
+    assert line.get_linewidth() == w._original_linewidth, \
+        "清除后线宽应恢复原始值（不留「无窗却加粗」的曲线）"
+
+    # 清空后仍能正常钉窗
+    p = ax.transData.transform((float(x[10]), float(y[10])))
+    w._on_mouse_move(_ev_at_px(p[0], p[1], ax))
+    w._on_click(_ev_at_px(p[0], p[1], ax))
+    w._on_release(_ev_at_px(p[0], p[1], ax))
+    assert len(w._pinned_annotations.get(line, [])) == 1, "清除后应能继续钉窗"
+    print("    OK: 2 个窗一次清空、线宽复原、之后仍可钉窗")
+    w.close()
+
+
+def test_clear_pins_also_hides_hover_ann():
+    """点「清除提示窗」时，正在显示的悬停窗也必须收起。
+
+    否则状态自相矛盾：窗还挂着，而 `_hover_state` 仍是那个点 → 后续 mouse move
+    走「状态幂等」直接跳过，永远不再补上高亮线宽。
+    """
+    print("[18] 清窗按钮同时收起悬停窗 ...")
+    w, ax, line, x, y = _mk_sparse()
+    p = ax.transData.transform((float(x[10]), float(y[10])))
+    w._on_mouse_move(_ev_at_px(p[0], p[1], ax))
+    w._on_click(_ev_at_px(p[0], p[1], ax))
+    w._on_release(_ev_at_px(p[0], p[1], ax))
+    # 悬停到同曲线另一个点（有固定窗时仍可悬停）
+    p2 = ax.transData.transform((float(x[20]), float(y[20])))
+    w._on_mouse_move(_ev_at_px(p2[0], p2[1], ax))
+    assert w._hover_ann.get_visible(), "前提：悬停窗应可见"
+
+    w._clear_pinned_annotations()
+    assert not w._hover_ann.get_visible(), "清窗后悬停窗应一并收起"
+    assert w._hover_state is None, \
+        "悬停状态应一并清空（否则下次 mouse move 会因幂等跳过，不再补高亮）"
+    assert line.get_linewidth() == w._original_linewidth
+    print("    OK: 悬停窗收起、状态清空、线宽复原")
+    w.close()
+
+
 if __name__ == "__main__":
     test_hover_hysteresis_no_jitter()
     test_pinned_annotations_do_not_overlap()
@@ -724,4 +787,6 @@ if __name__ == "__main__":
     test_realtime_mode_hover_and_pin()
     test_hover_works_on_pinned_curve()
     test_hover_dedup_on_pinned_point()
+    test_clear_all_pinned_annotations()
+    test_clear_pins_also_hides_hover_ann()
     print("\nALL PASS")
