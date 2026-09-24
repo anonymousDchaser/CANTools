@@ -9,7 +9,9 @@
 5）每次 blit 都必须带上悬停提示窗（否则坐标文本与提示窗互相擦除 → 闪烁）；
 6）离开曲线后提示窗含箭头整体隐藏（治「残留小箭头」）；
 7）捕获背景位图前必须隐藏临时图层（治「第一个提示窗永远不消失」的鬼影，
-   含拖动标记线时的同类缺陷）。
+   含拖动标记线时的同类缺陷）；
+8）点击钉住的数据点必须与悬停窗显示的是同一个点（治「窗在 A、点下去钉在 B」）；
+9）同一个点只保留一个提示窗（悬停窗不叠加、重复点击不堆窗）。
 """
 import os
 import sys
@@ -57,6 +59,25 @@ def _mk_widget(n=200):
     w.plot_signals([sig])          # 内部走 _redraw → _draw_shared
     line = next(iter(w._line_sig_name))
     return w, line.axes, line, x, y
+
+
+def _mk_sparse(n=41):
+    """稀疏采样 + 已 resize：点间距大，便于构造「鼠标偏 1px 就跨到下一个点」。"""
+    w = PlotWidget()
+    x = np.arange(n, dtype=float)
+    y = 10.0 * np.sin(x / 6.0)
+    w.plot_signals([DecodedSignal("M", "Sig", x, y)])
+    line = next(iter(w._line_sig_name))
+    ax = line.axes
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+    return w, ax, line, x, y
+
+
+def _ev_at_px(px, py, ax, button=1):
+    """按像素位置造事件：xdata/ydata 由像素反算，与真实鼠标事件一致。"""
+    xd, yd = ax.transData.inverted().transform((px, py))
+    return _Ev(px, py, float(xd), float(yd), ax, button)
 
 
 def test_hover_hysteresis_no_jitter():
@@ -458,6 +479,163 @@ def test_bg_cache_excludes_dragged_marks():
     w.close()
 
 
+def test_pin_snaps_to_hover_shown_point():
+    """点击钉住的数据点必须与悬停窗里显示的是**同一个点**。
+
+    用户原话：「当前曲线未点击过数据点，假设鼠标移动到数据点 A 时显示了提示窗，
+    但是点击之后，提示窗会显示到数据点 A 的后一个点 B，只有第一个提示窗有问题」。
+
+    根因：悬停带切换滞后（HOVER_SWITCH_PX），鼠标落在 A 右侧 1~14px 时窗里仍是
+    A；而点击用 `searchsorted(event.xdata)` 取点，取到的是「第一个 x >= 鼠标 x
+    的采样点」→ 只要鼠标偏到 A 右边就恒为 B。修复前 dx=1..12 全部不一致。
+    """
+    print("[11] 点击钉住点 == 悬停窗显示点 ...")
+    bad = []
+    for dx in (1, 2, 3, 4, 6, 8, 10, 12):
+        w, ax, line, x, y = _mk_sparse()
+        i = 20
+        px, py = ax.transData.transform((float(x[i]), float(y[i])))
+        ev = _ev_at_px(px + dx, py, ax)
+        w._on_mouse_move(ev)
+        assert w._hover_ann is not None and w._hover_ann.get_visible(), \
+            f"dx={dx}: 悬停窗应可见"
+        shown_x = float(w._hover_ann.xy[0])
+        assert abs(shown_x - float(x[i])) < 1e-9, \
+            f"dx={dx}: 滞后半径内悬停窗应仍显示 A, got={shown_x}"
+        w._on_click(ev)
+        w._on_release(ev)
+        anns = w._pinned_annotations.get(line, [])
+        assert anns, f"dx={dx}: 应钉出一个提示窗"
+        if abs(float(anns[0].xy[0]) - shown_x) > 1e-9:
+            bad.append((dx, shown_x, float(anns[0].xy[0])))
+        w.close()
+    assert not bad, f"点击钉住点与悬停窗显示点不一致 (dx, 窗显示, 实际钉住): {bad}"
+    print("    8 个偏移量（1~12px）全部与悬停窗一致")
+    w.close()
+
+
+def test_same_point_single_annotation():
+    """同一个点只应有一个提示窗：悬停窗不得与固定窗叠加，重复点击不叠加。
+
+    用户原话：「同一个点点击应该只显示一个提示窗」。
+    修复前实测：第 1 次点击后同时可见 hover + pinned 两个窗，第 2/3 次点击各再 +
+    一个（2 → 3 → 4 个）。
+    """
+    print("[12] 同一点只保留一个提示窗 ...")
+    w, ax, line, x, y = _mk_sparse()
+    i = 20
+    px, py = ax.transData.transform((float(x[i]), float(y[i])))
+    for k in (1, 2, 3):
+        ev = _ev_at_px(px, py, ax)
+        w._on_mouse_move(ev)
+        w._on_click(ev)
+        w._on_release(ev)
+        anns = w._pinned_annotations.get(line, [])
+        assert len(anns) == 1, f"第{k}次点击后应有 1 个固定窗, got={len(anns)}"
+        hover_visible = (w._hover_ann is not None
+                         and w._hover_ann.get_visible())
+        assert not hover_visible, f"第{k}次点击后悬停窗应已收起（同一点只留一个窗）"
+    pt = (float(anns[0].xy[0]), float(anns[0].xy[1]))
+    assert abs(pt[0] - float(x[i])) < 1e-9 and abs(pt[1] - float(y[i])) < 1e-9, \
+        f"固定窗应钉在 (x[{i}], y[{i}]), got={pt}"
+    print("    3 次点击均只有 1 个窗，且钉在原点上")
+    w.close()
+
+
+def test_pin_follows_hover_curve_with_two_curves():
+    """两条曲线靠近时，点击同样应按**悬停窗所属的那条曲线**钉点。
+
+    同类缺陷的另一半：`_find_nearest_line` 只看「点击位置离哪条曲线最近」，而
+    悬停带滞后仍锁定在先前那条曲线上 → 会出现「窗在前一条曲线，点下去钉在后一条」。
+    """
+    print("[13] 双曲线：点击跟随悬停窗所属曲线 ...")
+    w = PlotWidget()
+    w.set_subplot_mode(False)           # 共享 Y 轴：两条曲线落在同一个 axes 里
+    x = np.arange(41, dtype=float)
+    y1 = 10.0 * np.sin(x / 6.0)
+    y2 = y1 + 0.5                       # 与上一条仅差半个单位
+    w.plot_signals([DecodedSignal("M", "S1", x, y1),
+                    DecodedSignal("M", "S2", x, y2)])
+    by_name = {name: ln for ln, name in w._line_sig_name.items()}
+    assert len(by_name) == 2, f"应有 2 条曲线, got={sorted(by_name)}"
+    line1, line2 = by_name["S1"], by_name["S2"]
+    ax = line1.axes
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+    assert line2.axes is ax, "本用例要求两条曲线共用一个 axes（共享 Y 轴模式）"
+    assert len([ln for ln in ax.get_lines() if len(ln.get_xdata())]) == 2, \
+        "该 axes 内应有 2 条数据曲线（否则用例不构成判别场景）"
+
+    i = 20
+    px, py = ax.transData.transform((float(x[i]), float(y1[i])))
+    w._on_mouse_move(_ev_at_px(px, py, ax))
+    assert abs(float(w._hover_ann.xy[0]) - float(x[i])) < 1e-9, "应悬停到 S1 上"
+
+    # 上移 10px：仍在锁定半径(14px)内 → 窗仍显示 S1 的点
+    ev2 = _ev_at_px(px, py + 10, ax)
+    w._on_mouse_move(ev2)
+    assert w._hover_ann.get_visible(), "滞后半径内悬停窗应保持可见"
+    # 判别性前提：此刻「离点击位置最近的曲线」已是 S2，若不沿用悬停窗就会钉错曲线
+    assert w._find_nearest_line(ev2) is line2, \
+        "构造前提不成立：本用例需要 _find_nearest_line 判成 S2"
+
+    w._on_click(ev2)
+    w._on_release(ev2)
+    assert line1 in w._pinned_annotations, "应钉在悬停窗所属的 S1 上"
+    assert line2 not in w._pinned_annotations, "不应钉到 S2 上"
+    print("    OK: 钉到悬停窗所属曲线（而非离鼠标最近的曲线）")
+    w.close()
+
+
+def test_realtime_mode_hover_and_pin():
+    """实时报文页（同一 PlotWidget 的实时模式）同样具备悬停 / 点击钉窗能力。
+
+    实时监控页 `realtime_monitor_widget._plot` 与分析页 `main_window._plot_widget`
+    是**同一个 PlotWidget 类**：悬停命中、blit 局部刷新、背景位图缓存、钉窗逻辑
+    都只有一份实现，因此本文件里的修复对两页同时生效。这里在实时模式下端到端
+    确认一次，避免「只在分析页验证过」的盲区。
+    """
+    print("[14] 实时模式：悬停与点击钉窗 ...")
+    w = PlotWidget()
+    key = (0x112, "TCU", "Speed")
+    w.start_realtime([key])
+    ts = np.arange(60, dtype=float) * 0.02
+    vs = 10.0 * np.sin(ts * 3.0)
+    for t_, v_ in zip(ts, vs):
+        w.push_sample(key[0], key[1], key[2], float(t_), float(v_))
+    w._rt_tick()
+
+    line = w._rt_lines[key]
+    ax = w._rt_axes[key]
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+
+    # 实时模式的左下角坐标文本由 _build_realtime 创建（与 _redraw 尾部的路径不同），
+    # 也就是说实时页同样有「坐标文本 + 悬停窗」两个 blit 图层要合并，不是简化版。
+    assert len(w._coord_texts) == len(w._fig.axes) == 1, \
+        f"实时模式应为每个 axes 建一个坐标文本, got={len(w._coord_texts)}"
+    i = 30
+    px, py = ax.transData.transform((float(ts[i]), float(vs[i])))
+    w._on_mouse_move(_ev_at_px(px, py, ax))
+    assert w._coord_texts[id(ax)].get_text() != "", "实时模式悬停应刷新坐标文本"
+    assert w._hover_ann is not None and w._hover_ann.get_visible(), \
+        "实时模式下悬停应显示提示窗"
+    assert w._hover_ann in w._persistent_blit_artists(), \
+        "实时模式下提示窗也应参与 blit（否则会被背景位图擦掉）"
+    shown = (float(w._hover_ann.xy[0]), float(w._hover_ann.xy[1]))
+
+    w._on_click(_ev_at_px(px, py, ax))
+    w._on_release(_ev_at_px(px, py, ax))
+    anns = w._pinned_annotations.get(line, [])
+    assert len(anns) == 1, f"实时模式下应钉出 1 个提示窗, got={len(anns)}"
+    got = (float(anns[0].xy[0]), float(anns[0].xy[1]))
+    assert abs(got[0] - shown[0]) < 1e-9 and abs(got[1] - shown[1]) < 1e-9, \
+        f"钉住点应与悬停窗显示的一致: {got} vs {shown}"
+    assert not w._hover_ann.get_visible(), "钉住后悬停窗应收起（同一点只留一个窗）"
+    print("    OK: 实时模式悬停 + 点击钉住同一点 + 只留一个窗")
+    w.close()
+
+
 if __name__ == "__main__":
     test_hover_hysteresis_no_jitter()
     test_pinned_annotations_do_not_overlap()
@@ -470,4 +648,8 @@ if __name__ == "__main__":
     test_hover_ann_hidden_after_leave()
     test_bg_cache_excludes_hover_artists()
     test_bg_cache_excludes_dragged_marks()
+    test_pin_snaps_to_hover_shown_point()
+    test_same_point_single_annotation()
+    test_pin_follows_hover_curve_with_two_curves()
+    test_realtime_mode_hover_and_pin()
     print("\nALL PASS")

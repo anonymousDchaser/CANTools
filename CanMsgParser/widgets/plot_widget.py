@@ -1395,6 +1395,34 @@ class PlotWidget(QWidget):
         except Exception:  # noqa: BLE001
             return None
 
+    @staticmethod
+    def _nearest_sample_idx(xdata, ydata, x, y, x_range, y_range):
+        """曲线上离 (x, y) 最近的采样点下标与归一化距离。
+
+        距离按「x / y 各自归一化到轴范围」计算（与视觉距离同量级），候选只取
+        `searchsorted` 命中位置及其左右各一个点，顺序固定为 [idx, idx-1, idx+1]。
+
+        ⚠️ **悬停与「点击钉住」必须共用这一函数**。点击若改用
+        `searchsorted(event.xdata)` 直接取点，取到的是「第一个 x >= 鼠标 x 的
+        采样点」——鼠标只要落在采样点右侧一个像素就会取到后一个点，而悬停窗
+        因带切换滞后（HOVER_SWITCH_PX）仍显示前一个点 → 表现为
+        「窗在 A，点下去却钉在 B」。
+        """
+        n = len(xdata)
+        idx = int(np.clip(np.searchsorted(xdata, x), 0, n - 1))
+        best_i = idx
+        best_dist = float("inf")
+        for ci in (idx, idx - 1, idx + 1):
+            if ci < 0 or ci >= n:
+                continue
+            dx = (xdata[ci] - x) / x_range
+            dy = (ydata[ci] - y) / y_range
+            dist = dx * dx + dy * dy
+            if dist < best_dist:
+                best_dist = dist
+                best_i = ci
+        return best_i, best_dist
+
     def _nearest_point(self, event):
         """返回 (line, (x, y))——鼠标所在 axes 内最近的数据点；无命中返回 None。
 
@@ -1447,20 +1475,12 @@ class PlotWidget(QWidget):
             ydata = line.get_ydata()
             if len(xdata) == 0:
                 continue
-            idx = int(np.clip(np.searchsorted(xdata, event.xdata), 0, len(xdata) - 1))
-            candidates = [idx]
-            if idx > 0:
-                candidates.append(idx - 1)
-            if idx < len(xdata) - 1:
-                candidates.append(idx + 1)
-            for ci in candidates:
-                dx = (xdata[ci] - event.xdata) / x_range
-                dy = (ydata[ci] - event.ydata) / y_range
-                dist = dx * dx + dy * dy
-                if dist < best_dist:
-                    best_dist = dist
-                    best_line = line
-                    best_point = (float(xdata[ci]), float(ydata[ci]))
+            ci, dist = self._nearest_sample_idx(
+                xdata, ydata, event.xdata, event.ydata, x_range, y_range)
+            if dist < best_dist:
+                best_dist = dist
+                best_line = line
+                best_point = (float(xdata[ci]), float(ydata[ci]))
 
         if best_line is None or best_point is None:
             self._release_hover_lock()
@@ -1486,6 +1506,36 @@ class PlotWidget(QWidget):
         self._hover_locked = (best_line, best_point)
         self._hover_locked_axes = ax
         return best_line, best_point
+
+    def _hover_shown(self, event=None):
+        """返回悬停提示窗**此刻正在显示**的 (line, point)；没有窗时返回 None。
+
+        判据：`_hover_state`（窗里那份文本对应的点）与锁定点一致，且窗确实可见。
+        悬停带切换滞后，锁定点只是「不换点」的锚，只有两者同时成立才说明用户
+        眼里那个窗显示的就是这个点 —— 「点击钉住」应当与它保持一致。
+
+        event 非 None 时额外要求鼠标仍在锁定半径 `HOVER_SWITCH_PX` 内：滚轮
+        缩放等操作会移动画面却不产生 mouse move，此时窗里的点可能已离鼠标很
+        远，不能再拿它当点击落点（否则会钉到远离鼠标的点上）。
+        """
+        st = self._hover_state
+        locked = self._hover_locked
+        if (st is None or locked is None or self._hover_ann is None
+                or not self._hover_ann.get_visible()):
+            return None
+        line, point = locked
+        if (st[0] != id(line)
+                or st[1] != round(float(point[0]), 9)
+                or st[2] != round(float(point[1]), 9)):
+            return None
+        if event is not None:
+            mpx = self._point_px(event, point)
+            if mpx is None:
+                return None
+            dist_px = ((mpx[0] - event.x) ** 2 + (mpx[1] - event.y) ** 2) ** 0.5
+            if dist_px > HOVER_SWITCH_PX:
+                return None
+        return line, point
 
     def _release_hover_lock(self):
         """解除悬停锁定（鼠标离开绘图区 / 未命中 / 重绘时调用）。"""
@@ -2262,27 +2312,55 @@ class PlotWidget(QWidget):
             if len(xdata) == 0:
                 continue
 
-            idx = np.searchsorted(xdata, event.xdata)
-            idx = np.clip(idx, 0, len(xdata) - 1)
-
-            candidates = [idx]
-            if idx > 0:
-                candidates.append(idx - 1)
-            if idx < len(xdata) - 1:
-                candidates.append(idx + 1)
-
-            for ci in candidates:
-                dx = (xdata[ci] - event.xdata) / x_range
-                dy = (ydata[ci] - event.ydata) / y_range
-                dist = dx * dx + dy * dy
-                if dist < best_dist:
-                    best_dist = dist
-                    best_line = line
+            _, dist = self._nearest_sample_idx(
+                xdata, ydata, event.xdata, event.ydata, x_range, y_range)
+            if dist < best_dist:
+                best_dist = dist
+                best_line = line
 
         # 与悬停相同的阈值
         if best_dist < 0.001:
             return best_line
         return None
+
+    def _has_pinned_at(self, line, x) -> bool:
+        """该曲线上是否已有钉在数据点 x 处的提示窗（用于「同一点只留一个窗」）。"""
+        for ann in self._pinned_annotations.get(line, []) or []:
+            try:
+                if abs(float(ann.xy[0]) - float(x)) < 1e-9:
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    def _pin_sample_index(self, line, event):
+        """点击处应钉住的采样点下标；无法判定返回 None。
+
+        选点规则**与悬停一致**（见 `_nearest_sample_idx` 的说明）：
+        ① 若悬停窗此刻正显示该曲线上的某个点（`_hover_shown`），就用它 ——
+           用户看到的窗就是这个点，点下去必须钉同一个；
+        ② 否则退回与悬停相同的最近点度量。
+        """
+        xdata = line.get_xdata()
+        n = len(xdata)
+        if n == 0 or event.xdata is None or event.ydata is None:
+            return None
+
+        shown = self._hover_shown()
+        if shown is not None and shown[0] is line:
+            idx = int(np.clip(np.searchsorted(xdata, shown[1][0]), 0, n - 1))
+            if float(xdata[idx]) == float(shown[1][0]):
+                return idx
+
+        ax = line.axes
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x_range = max(xlim[1] - xlim[0], 1e-10)
+        y_range = max(ylim[1] - ylim[0], 1e-10)
+        idx, _ = self._nearest_sample_idx(
+            xdata, line.get_ydata(), event.xdata, event.ydata,
+            x_range, y_range)
+        return idx
 
     def _toggle_pin(self, line, event):
         """在点击位置钉住一个提示窗（同一曲线最多 PIN_ANN_MAX 个，FIFO 淘汰）。
@@ -2290,18 +2368,33 @@ class PlotWidget(QWidget):
         与旧实现的区别：旧版每条曲线只能有一个固定注释，再次点击同一曲线会
         「取消固定」；新版每次点击都在该点新增一个提示窗，最多 3 个，超出时
         移除最早的。关闭请用右键点击该提示窗（见 _on_click）。
+
+        **同一个数据点只保留一个提示窗**：重复点击同一点直接忽略（不叠加、
+        也不删除；要删请点窗本身）。钉住时同时收起悬停窗并解除悬停锁定 ——
+        悬停窗显示的就是刚钉住的这个点，留着会与固定窗叠在一起（看起来像
+        两个窗 / 文字重影）；锁定不解除的话，下一次 mouse move 又会经
+        「滞后沿用」路径把悬停窗贴回来。
         """
         ax = line.axes
         label = line.get_label()
         xdata = line.get_xdata()
         if len(xdata) == 0:
             return
-        idx = int(np.clip(np.searchsorted(xdata, event.xdata), 0, len(xdata) - 1))
+        idx = self._pin_sample_index(line, event)
+        if idx is None:
+            return
         x = float(xdata[idx])
         y = float(line.get_ydata()[idx])
 
+        if self._has_pinned_at(line, x):
+            return
+
         text = self._build_point_text(line, x, y, label)
         color = self._line_color_hex(line)
+
+        # blit=False：紧随其后的整幅重绘会把这一步的效果一并画出，省掉一次 blit
+        self._remove_highlight(blit=False)
+        self._release_hover_lock()
 
         line.set_linewidth(4)
         self._pinned_lines.add(line)
@@ -2369,6 +2462,11 @@ class PlotWidget(QWidget):
 
         # 位移足够小 → 视为单击：在按下的位置钉一个提示窗
         if moved < PAN_CLICK_PX:
-            nearest = self._find_nearest_line(event)
+            # 悬停窗正显示某个点时优先钉它（窗在 A 就钉 A）：悬停带切换滞后，
+            # 「窗里显示的点」与「点击位置最近的点」可能不是同一个，沿用
+            # _find_nearest_line 会出现「窗在 A、点下去钉在 B」。
+            shown = self._hover_shown(event)
+            nearest = (shown[0] if shown is not None
+                       else self._find_nearest_line(event))
             if nearest is not None:
                 self._toggle_pin(nearest, event)
