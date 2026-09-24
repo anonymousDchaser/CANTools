@@ -11,7 +11,9 @@
 7）捕获背景位图前必须隐藏临时图层（治「第一个提示窗永远不消失」的鬼影，
    含拖动标记线时的同类缺陷）；
 8）点击钉住的数据点必须与悬停窗显示的是同一个点（治「窗在 A、点下去钉在 B」）；
-9）同一个点只保留一个提示窗（悬停窗不叠加、重复点击不堆窗）。
+9）同一个点只保留一个提示窗（悬停窗不叠加、重复点击不堆窗）；
+10）曲线已有固定窗时，**其它**数据点仍可悬停（按点去重，不是整条曲线屏蔽），
+   且悬停这条曲线期间离开不得把固定态的加粗线宽打回原始值。
 """
 import os
 import sys
@@ -636,6 +638,74 @@ def test_realtime_mode_hover_and_pin():
     w.close()
 
 
+def test_hover_works_on_pinned_curve():
+    """曲线已有固定提示窗时，同曲线的**其它**数据点仍应能悬停（按点去重）。
+
+    用户要求：「曲线有固定窗，希望还是可以有悬停窗」。
+    旧实现是「整条曲线一律不悬停」（`_nearest_point` 里 `line in _pinned_lines`
+    直接 `continue`），副作用是该曲线上除已钉住的点外再无任何悬停反馈。
+
+    另一半：悬停这条固定曲线后离开，**不能**把它的加粗线宽打回原始值 —— 否则
+    固定窗还在、曲线却忽然变细（`_remove_highlight` 原先无条件恢复线宽）。
+    """
+    print("[15] 有固定窗的曲线仍可悬停（按点去重）+ 线宽不被破坏 ...")
+    w, ax, line, x, y = _mk_sparse()
+    i_pin, i_other = 10, 20
+
+    # 先钉住 x[10]
+    p = ax.transData.transform((float(x[i_pin]), float(y[i_pin])))
+    w._on_mouse_move(_ev_at_px(p[0], p[1], ax))
+    w._on_click(_ev_at_px(p[0], p[1], ax))
+    w._on_release(_ev_at_px(p[0], p[1], ax))
+    assert len(w._pinned_annotations.get(line, [])) == 1, "应钉出 1 个固定窗"
+    assert line in w._pinned_lines and line.get_linewidth() == 4.0
+
+    # 悬停同曲线的另一个点 → 必须有悬停窗
+    p2 = ax.transData.transform((float(x[i_other]), float(y[i_other])))
+    w._on_mouse_move(_ev_at_px(p2[0], p2[1], ax))
+    assert w._hover_ann is not None and w._hover_ann.get_visible(), \
+        "曲线有固定窗时，其它数据点仍应能悬停"
+    assert abs(float(w._hover_ann.xy[0]) - float(x[i_other])) < 1e-9
+
+    # 离开曲线 → 固定态线宽不得被打回
+    w._on_mouse_move(_Ev(0, 0, None, None, None))
+    assert line.get_linewidth() == 4.0, \
+        "离开时不能把固定曲线的加粗打回（固定窗还在）"
+    assert len(w._pinned_annotations.get(line, [])) == 1, "固定窗不应被移除"
+
+    # 关掉固定窗 → 线宽恢复，悬停照常
+    w._close_pinned_ann(line, 0)
+    assert line not in w._pinned_lines
+    assert line.get_linewidth() == w._original_linewidth, "关窗后应恢复原始线宽"
+    w._on_mouse_move(_ev_at_px(p2[0], p2[1], ax))
+    assert w._hover_ann.get_visible(), "关窗后悬停应照常工作"
+    w._on_mouse_move(_Ev(0, 0, None, None, None))
+    assert line.get_linewidth() == w._original_linewidth
+    print("    OK: 固定窗曲线可悬停其它点；线宽仅在有固定窗时保持加粗")
+    w.close()
+
+
+def test_hover_dedup_on_pinned_point():
+    """悬停到「已被钉住的同一个数据点」时不再弹悬停窗（按点去重）。"""
+    print("[16] 已固定的点不再叠加悬停窗 ...")
+    w, ax, line, x, y = _mk_sparse()
+    i = 10
+    p = ax.transData.transform((float(x[i]), float(y[i])))
+    w._on_mouse_move(_ev_at_px(p[0], p[1], ax))
+    w._on_click(_ev_at_px(p[0], p[1], ax))
+    w._on_release(_ev_at_px(p[0], p[1], ax))
+    assert len(w._pinned_annotations.get(line, [])) == 1
+
+    # 移开再回到同一点：悬停窗不得出现
+    w._on_mouse_move(_Ev(0, 0, None, None, None))
+    w._on_mouse_move(_ev_at_px(p[0], p[1], ax))
+    assert not (w._hover_ann is not None and w._hover_ann.get_visible()), \
+        "已固定的数据点上不应再叠加悬停窗（否则看起来是两个窗）"
+    assert len(w._pinned_annotations.get(line, [])) == 1, "固定窗数不应变化"
+    print("    OK: 已固定点无悬停窗，固定窗保持 1 个")
+    w.close()
+
+
 if __name__ == "__main__":
     test_hover_hysteresis_no_jitter()
     test_pinned_annotations_do_not_overlap()
@@ -652,4 +722,6 @@ if __name__ == "__main__":
     test_same_point_single_annotation()
     test_pin_follows_hover_curve_with_two_curves()
     test_realtime_mode_hover_and_pin()
+    test_hover_works_on_pinned_curve()
+    test_hover_dedup_on_pinned_point()
     print("\nALL PASS")

@@ -1448,7 +1448,8 @@ class PlotWidget(QWidget):
                 if mpx is not None:
                     dist_px = ((mpx[0] - event.x) ** 2
                                + (mpx[1] - event.y) ** 2) ** 0.5
-                    if dist_px <= HOVER_SWITCH_PX:
+                    if (dist_px <= HOVER_SWITCH_PX
+                            and not self._has_pinned_at(l_line, l_point[0])):
                         return l_line, l_point
             else:
                 self._release_hover_lock()
@@ -1469,8 +1470,6 @@ class PlotWidget(QWidget):
                 continue
             if line is self._hover_point:
                 continue
-            if line in self._pinned_lines:
-                continue
             xdata = line.get_xdata()
             ydata = line.get_ydata()
             if len(xdata) == 0:
@@ -1483,6 +1482,13 @@ class PlotWidget(QWidget):
                 best_point = (float(xdata[ci]), float(ydata[ci]))
 
         if best_line is None or best_point is None:
+            self._release_hover_lock()
+            return None
+
+        # ── 按点去重：该数据点已有固定提示窗 → 不再叠加悬停窗 ──
+        # 两者信息完全相同，叠在一起看着像「两个窗」；只排除**这一个点**，
+        # 同一曲线的其它数据点仍可正常悬停（旧实现是整条曲线一律不悬停）。
+        if self._has_pinned_at(best_line, best_point[0]):
             self._release_hover_lock()
             return None
 
@@ -1557,8 +1563,10 @@ class PlotWidget(QWidget):
 
         # 已经加粗的曲线不重复 set_linewidth：该调用会标脏 artist，而线宽变更
         # 属于「背景变化」（见下方 _invalidate_bg_cache 分支），重复触发纯属浪费。
+        # 固定曲线（有固定提示窗）的线宽本就是加粗态，同理不必再设。
         if line is not self._highlighted_line:
-            line.set_linewidth(4)
+            if line not in self._pinned_lines:
+                line.set_linewidth(4)
             self._highlighted_line = line
 
         ax = line.axes
@@ -2065,9 +2073,12 @@ class PlotWidget(QWidget):
         """
         had = False
         if self._highlighted_line is not None:
-            self._highlighted_line.set_linewidth(self._original_linewidth)
-            # 线宽恢复属于背景变化 → 背景缓存失效
-            self._invalidate_bg_cache()
+            # ⚠️ 该曲线若有固定提示窗，加粗是「固定态」（线宽 4.0），不能被这次
+            # 离开打回原始线宽 —— 否则固定窗还在、曲线却忽然变细。
+            if self._highlighted_line not in self._pinned_lines:
+                self._highlighted_line.set_linewidth(self._original_linewidth)
+                # 线宽恢复属于背景变化 → 背景缓存失效
+                self._invalidate_bg_cache()
             self._highlighted_line = None
             had = True
         artists = []
