@@ -7,7 +7,9 @@
 3）左键点到固定提示窗也能关闭（与右键等价）；
 4）同一数据点上鼠标微动不重绘提示窗（状态幂等，治「一直闪」）；
 5）每次 blit 都必须带上悬停提示窗（否则坐标文本与提示窗互相擦除 → 闪烁）；
-6）离开曲线后提示窗含箭头整体隐藏（治「残留小箭头」）。
+6）离开曲线后提示窗含箭头整体隐藏（治「残留小箭头」）；
+7）捕获背景位图前必须隐藏临时图层（治「第一个提示窗永远不消失」的鬼影，
+   含拖动标记线时的同类缺陷）。
 """
 import os
 import sys
@@ -38,6 +40,13 @@ class _Ev:
         self.inaxes = inaxes
         self.button = button
         self.name = name
+
+
+def _buf_to_arr(buf):
+    """Agg 缓冲（memoryview / BytesIO）→ 一维 uint8 ndarray。"""
+    if hasattr(buf, "getvalue"):
+        buf = buf.getvalue()
+    return np.frombuffer(buf, dtype=np.uint8).copy()
 
 
 def _mk_widget(n=200):
@@ -341,6 +350,114 @@ def test_hover_ann_hidden_after_leave():
     w.close()
 
 
+def test_bg_cache_excludes_hover_artists():
+    """捕获背景位图时必须先隐藏临时图层，否则它们会被烙进背景 → 鬼影。
+
+    用户原话：「鼠标在曲线上滑动，遇到第一个点会显示提示窗，然后继续滑动，
+    遇到新的点会出现新的提示窗，但是第一个提示窗不会消失」。
+
+    根因：`_apply_highlight` 是**先**写好提示窗文本/位置并置为可见，**之后**才
+    走到 `_blit_artists` → `_ensure_bg_cache`。缓存缺失时的 `canvas.draw()`
+    就把第一个提示窗一起画进了背景位图；此后每次 `restore_region` 都把它贴回来，
+    而同一曲线内换点并不失效缓存 → 它永远不走。
+    """
+    print("[9] 背景位图不得烙入临时图层（治「第一个提示窗不消失」）...")
+    w, ax, line, x, y = _mk_widget(n=1200)
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+
+    # 注意：不能在 copy_from_bbox 处用 _transient_blit_artists() 判断 —— 该函数
+    # 按「当前可见」过滤，而修复生效时它们此刻**已经被隐藏**，返回空列表，
+    # 无法区分「本来就不存在」与「被隐藏」两种情形。故在 canvas.draw() 时刻
+    # 直接检查那几个确定的 artist 对象。
+    draws = []
+    orig_draw = w._canvas.draw
+
+    def _spy_draw():
+        txt = w._coord_texts.get(id(ax))
+        draws.append((
+            None if w._hover_ann is None else w._hover_ann.get_visible(),
+            None if w._hover_point is None else w._hover_point.get_visible(),
+            None if txt is None else txt.get_visible(),
+        ))
+        return orig_draw()
+
+    w._canvas.draw = _spy_draw
+    try:
+        i = 600
+        px, py = ax.transData.transform((float(x[i]), float(y[i])))
+        w._on_mouse_move(_Ev(px, py, float(x[i]), float(y[i]), ax))
+    finally:
+        w._canvas.draw = orig_draw
+
+    real = [d for d in draws if d[0] is not None]
+    assert real, "悬停应触发一次背景位图捕获（canvas.draw 未被调用）"
+    bad = [d for d in real if d[0] or d[1] or d[2]]
+    assert not bad, (
+        f"捕获背景时仍有临时图层可见 (悬停框,高亮点,坐标文本)={bad} "
+        f"→ 会被烙进背景位图，之后每次 blit 都贴回来")
+
+    # 像素级证明：把临时图层全部隐藏后重绘，应与捕获到的背景逐字节一致。
+    # 若提示窗被烙进去，这里必然出现成片差异像素。
+    for art in w._transient_blit_artists():
+        art.set_visible(False)
+    w._canvas.draw()
+    ref = _buf_to_arr(w._canvas.copy_from_bbox(w._fig.bbox))
+    snap = _buf_to_arr(w._bg_cache)
+    assert snap.shape == ref.shape, \
+        f"缓冲尺寸不一致: {snap.shape} vs {ref.shape}"
+    diff = int(np.count_nonzero(snap != ref))
+    assert diff == 0, \
+        f"背景位图与「干净重绘」不一致：{diff} 字节被污染（提示窗被烙进背景）"
+    print(f"    OK: 捕获时 {len(real)} 次绘制均已隐藏提示窗，"
+          f"背景与干净重绘逐字节一致")
+    w.close()
+
+
+def test_bg_cache_excludes_dragged_marks():
+    """拖动标记线时，被拖的竖线/色带/Δt 框同样不得烙进背景位图。
+
+    同类缺陷：`_add_mark` 置空缓存后，首次 `_move_mark` 的 blit 会顺手捕获
+    背景，若不排除这批 artist，拖动后原地会留下一套不动的鬼影。
+    """
+    print("[10] 拖动标记线不得留下原地鬼影 ...")
+    w, ax, line, x, y = _mk_widget(n=1200)
+    w.resize(1200, 700)
+    ax.figure.canvas.draw()
+
+    w._add_mark(float(x[300]))
+    w._add_mark(float(x[400]))
+
+    watch = list(w._mark_artists[0]) if w._mark_artists else []
+    if w._mark_spans and w._mark_spans[0]:
+        watch.extend(w._mark_spans[0])
+    if w._mark_delta_anns and w._mark_delta_anns[0] is not None:
+        watch.append(w._mark_delta_anns[0])
+    assert watch, "应已生成标记线（可能还有色带/Δt 框）"
+
+    snap = {}
+
+    def _grab(buf):
+        snap["vis"] = [(a, a.get_visible()) for a in watch]
+        return buf
+
+    # 复现 _add_mark 之后的状态：缓存为空，本次 blit 必然捕获背景
+    w._invalidate_bg_cache()
+    orig_cfb = w._canvas.copy_from_bbox
+    w._canvas.copy_from_bbox = lambda bbox: _grab(orig_cfb(bbox))
+    try:
+        w._move_mark(0, float(x[250]))
+    finally:
+        w._canvas.copy_from_bbox = orig_cfb
+
+    assert snap, "拖动标记应触发一次背景位图捕获"
+    leaked = [a for a, v in snap["vis"] if v]
+    assert not leaked, \
+        f"捕获背景时有 {len(leaked)} 个标记图层仍可见 → 拖动后原地留鬼影"
+    print(f"    OK: {len(watch)} 个标记图层在捕获时均已隐藏")
+    w.close()
+
+
 if __name__ == "__main__":
     test_hover_hysteresis_no_jitter()
     test_pinned_annotations_do_not_overlap()
@@ -351,4 +468,6 @@ if __name__ == "__main__":
     test_hover_idempotent_no_redraw()
     test_blit_always_carries_hover_ann()
     test_hover_ann_hidden_after_leave()
+    test_bg_cache_excludes_hover_artists()
+    test_bg_cache_excludes_dragged_marks()
     print("\nALL PASS")

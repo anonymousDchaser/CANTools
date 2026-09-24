@@ -376,25 +376,75 @@ class PlotWidget(QWidget):
         self._bg_cache = None
         self._curve_px_cache.clear()
 
-    def _ensure_bg_cache(self):
-        """确保背景位图缓存可用；缺失时重新整幅绘制并缓存。"""
-        if self._bg_cache is None:
-            self._canvas.draw()
-            try:
-                self._bg_cache = self._canvas.copy_from_bbox(self._fig.bbox)
-            except Exception:  # noqa: BLE001
-                self._bg_cache = None
+    def _transient_blit_artists(self) -> list:
+        """返回「靠 blit 临时绘制、**绝不能被烙进背景位图**」的 artist。
 
-    def _blit_artists(self, artists):
+        包含常驻 blit 图层（坐标文本 / 悬停高亮点与提示窗）与标记吸附预览线。
+        拖拽中的标记线由调用方通过 `_blit_artists(..., transient=...)` 追加。
+        """
+        arts = list(self._persistent_blit_artists())
+        for art in self._preview_artists:
+            if art is not None and art not in arts:
+                arts.append(art)
+        return arts
+
+    def _ensure_bg_cache(self, transient=None):
+        """确保背景位图缓存可用；缺失时重新整幅绘制并缓存。
+
+        ⚠️ 捕获背景前**必须**先隐藏那批临时图层。它们此刻大多已经可见
+        （`_apply_highlight` 是先写好提示窗文本/位置、把它置为可见，之后才走到
+        `_blit_artists` 的），直接 `canvas.draw()` 会把它们一起画进背景位图；
+        此后每次 `restore_region` 都会把这批像素原样贴回，而同一曲线内换点
+        又不会让缓存失效 —— 表现为「第一个悬停提示窗永远留在原地不消失」的鬼影
+        （2026-09-24 现象：沿曲线滑动，新点弹出新提示窗，第一个提示窗一直不走）。
+
+        同理可防止：坐标文本改短后残留下一位数字、标记预览线残留。
+        注意钉住的固定提示窗（`_pinned_annotations`）与时间差标记**属于背景**，
+        不在隐藏之列。
+
+        Args:
+            transient: 额外需要临时隐藏的 artist（如 `_move_mark` 正在拖动的
+                标记线/色带/Δt 框 —— 它们随后会被本次 blit 重画，故不能进背景）。
+        """
+        if self._bg_cache is not None:
+            return
+        hide = self._transient_blit_artists()
+        for art in (transient or []):
+            if art is not None and art not in hide:
+                hide.append(art)
+        hidden = []
+        for art in hide:
+            try:
+                if art.get_visible():
+                    art.set_visible(False)
+                    hidden.append(art)
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            self._canvas.draw()
+            self._bg_cache = self._canvas.copy_from_bbox(self._fig.bbox)
+        except Exception:  # noqa: BLE001
+            self._bg_cache = None
+        finally:
+            # 无论缓存成功与否都要恢复可见，否则这些图层会「消失」
+            for art in hidden:
+                try:
+                    art.set_visible(True)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _blit_artists(self, artists, transient=None):
         """只重绘给定 artist 并贴回画面（背景取自缓存）。
 
         Args:
             artists: 需要重绘的 artist 可迭代表；None 项会被跳过。
+            transient: 同样需要重绘、但**不得烙进背景位图**的额外 artist
+                （见 `_ensure_bg_cache`）。
         """
         if not artists:
             return
         try:
-            self._ensure_bg_cache()
+            self._ensure_bg_cache(transient)
             if self._bg_cache is None:
                 self._canvas.draw_idle()
                 return
@@ -1186,7 +1236,10 @@ class PlotWidget(QWidget):
             dirty.extend(self._mark_spans[g])
         if g < len(self._mark_delta_anns) and self._mark_delta_anns[g] is not None:
             dirty.append(self._mark_delta_anns[g])
-        self._blit_artists(dirty)
+        # 以 transient 传入：`_add_mark` 刚把缓存置空，本次 blit 会顺带捕获背景
+        # 位图，若不排除这批 artist，标记线/色带/Δt 框会被烙进背景，拖动后
+        # 原地留下一套不动的鬼影（同类缺陷，2026-09-24 一并修）。
+        self._blit_artists(dirty, transient=dirty)
 
     def _update_mark_group(self, g: int) -> None:
         """同步第 g 组的范围色带与 Δt 提示框（就地更新，不重建 artist）。"""
