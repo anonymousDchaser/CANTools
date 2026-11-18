@@ -616,7 +616,7 @@ class MessageTableWidget(QWidget):
         self._time_end.setFixedWidth(dp(90))
         filter_layout.addWidget(self._time_end)
 
-        self._apply_btn = QPushButton("🔍 应用过滤")
+        self._apply_btn = QPushButton("应用过滤")
         self._apply_btn.setProperty("class", "primary")
         self._apply_btn.clicked.connect(self._apply_filter)
         filter_layout.addWidget(self._apply_btn)

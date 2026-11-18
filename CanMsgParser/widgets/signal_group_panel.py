@@ -98,19 +98,19 @@ class SignalGroupPanel(QWidget):
         self._new_btn.clicked.connect(self._create_group)
         group_bar.addWidget(self._new_btn)
 
-        self._save_btn = QPushButton("💾 保存")
+        self._save_btn = QPushButton("保存")
         self._save_btn.setProperty("class", "compact")
         self._save_btn.setToolTip("将分组配置保存到 JSON 文件")
         self._save_btn.clicked.connect(self._save_config)
         group_bar.addWidget(self._save_btn)
 
-        self._load_btn = QPushButton("📂 加载")
+        self._load_btn = QPushButton("加载")
         self._load_btn.setProperty("class", "compact")
         self._load_btn.setToolTip("从 JSON 文件加载分组配置")
         self._load_btn.clicked.connect(self._load_config)
         group_bar.addWidget(self._load_btn)
 
-        self._delete_btn = QPushButton("🗑 删除")
+        self._delete_btn = QPushButton("删除")
         self._delete_btn.setProperty("class", "compact")
         self._delete_btn.setToolTip("删除当前选中的分组")
         self._delete_btn.setStyleSheet("""

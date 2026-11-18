@@ -720,7 +720,7 @@ class SignalSimWidget(QWidget):
             grp = self._groups.get(frame_id)
             if grp is None:
                 grp_item = QTreeWidgetItem(self._value_table)
-                grp_item.setText(COL_SIG, f"📦 报文组 0x{frame_id:03X}  {msg_name}")
+                grp_item.setText(COL_SIG, f"报文组 0x{frame_id:03X}  {msg_name}")
                 grp_item.setData(COL_SIG, Qt.UserRole, frame_id)
                 # 组周期（组内所有信号共享）
                 cycle_spin = QSpinBox()
@@ -1059,7 +1059,7 @@ class SignalSimWidget(QWidget):
         cycle = self._dbc_cycle_of(frame_id)
 
         grp_item = QTreeWidgetItem(self._value_table)
-        title = f"📦 原始报文 0x{frame_id:03X}"
+        title = f"原始报文 0x{frame_id:03X}"
         if msg_name:
             title += f"  {msg_name}"
         grp_item.setText(COL_SIG, title)

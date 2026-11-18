@@ -120,11 +120,12 @@ class MainWindow(QMainWindow):
             border-radius: 6px 6px 0 0;
             font-size: 13px;
             /* Qt 按「文字宽度 + padding」精确裁剪页签，实测仅余 2px 余量，
-               emoji 走字体回退时实际渲染更宽，四/五字页签末字就被切掉。
-               这里用 min-width 兜出富余宽度（最长的「🔢 位图查看器」约 119px，
+               字体回退时实际渲染更宽，四/五字页签末字就被切掉。
+               这里用 min-width 兜出富余宽度（最长的「位图查看器」约 81px，
                min-width 与字号同比例缩放，任一缩放档位下都留得住富余）；
                窗口最小宽度改为按屏幕自适应后，极窄窗口下 8 个页签放不下时，
-               Qt 会自动切换成左右滚动箭头（默认 usesScrollButtons=True）。 */
+               Qt 会自动切换成左右滚动箭头（默认 usesScrollButtons=True）。
+               ⚠️ 页签标题不要带 emoji：Qt5 在 macOS 上渲染彩色 emoji 会卡死。 */
             min-width: 132px;
         }
         QTabBar::tab:selected {
@@ -578,10 +579,10 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(dp(6))
 
-        sel_label = QLabel("已选信号（点 👁 显隐 · 长按 ⋮⋮ 排序）:")
+        sel_label = QLabel("已选信号（点行首图标显隐 · 长按 ⋮⋮ 排序）:")
         sel_label.setStyleSheet("color: #9090a0; font-weight: 500;")
         sel_label.setToolTip(
-            "点击行首 👁 眼睛图标：睁开=显示该曲线，闭眼=隐藏该曲线；\n"
+            "点击行首眼睛图标：睁开=显示该曲线，闭眼=隐藏该曲线；\n"
             "长按行右侧 ⋮⋮ 把手拖动可调整顺序；\n"
             "选中后按 Delete 或「移除选中」可删除"
         )
@@ -642,33 +643,33 @@ class MainWindow(QMainWindow):
         chart_layout.addWidget(chart_splitter)
         # ─── Tab 1: 连接状态 ───
         self._conn_widget = ConnectionStatusWidget()
-        self._tabs.addTab(self._conn_widget, "🔌 连接状态")
+        self._tabs.addTab(self._conn_widget, "连接状态")
 
-        self._tabs.addTab(chart_tab, "📈 曲线图")
+        self._tabs.addTab(chart_tab, "曲线图")
 
         # ─── Tab 3: 报文表格 ───
         self._message_table = MessageTableWidget()
-        self._tabs.addTab(self._message_table, "📋 报文表格")
+        self._tabs.addTab(self._message_table, "报文表格")
 
         # ─── Tab 4: 模拟上报 ───
         self._sim_widget = SignalSimWidget()
-        self._tabs.addTab(self._sim_widget, "📤 模拟上报")
+        self._tabs.addTab(self._sim_widget, "模拟上报")
 
         # ─── Tab 5: 实时监控 ───
         self._monitor_widget = RealtimeMonitorWidget()
-        self._tabs.addTab(self._monitor_widget, "📡 实时监控")
+        self._tabs.addTab(self._monitor_widget, "实时监控")
 
         # ─── Tab 6: 实时报文 ───
         self._realtime_msg_widget = RealtimeMessageWidget()
-        self._tabs.addTab(self._realtime_msg_widget, "📡 实时报文")
+        self._tabs.addTab(self._realtime_msg_widget, "实时报文")
 
         # ─── Tab 7: 报文回放 ───
         self._replay_widget = ReplayWidget()
-        self._tabs.addTab(self._replay_widget, "🔁 报文回放")
+        self._tabs.addTab(self._replay_widget, "报文回放")
 
         # ─── Tab 8: 位图查看器 ───
         self._bit_layout = BitLayoutView()
-        self._tabs.addTab(self._bit_layout, "🔢 位图查看器")
+        self._tabs.addTab(self._bit_layout, "位图查看器")
 
         # 共享连接管理器注入三页（模拟上报/实时监控/实时报文）+ 连接状态页
         self._conn_widget.set_connection_manager(self._conn_manager)

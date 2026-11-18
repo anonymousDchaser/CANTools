@@ -167,7 +167,7 @@ class BitLayoutView(QWidget):
         search_layout = QHBoxLayout()
         search_layout.setSpacing(dp(6))
 
-        lbl = QLabel("🔍 搜索:")
+        lbl = QLabel("搜索:")
         search_layout.addWidget(lbl)
 
         self._search_input = QLineEdit()
@@ -205,7 +205,7 @@ class BitLayoutView(QWidget):
         right_layout.addWidget(self._graphics_view, stretch=3)
 
         # 信号信息列表
-        sig_label = QLabel("📋 信号详情:")
+        sig_label = QLabel("信号详情:")
         right_layout.addWidget(sig_label)
 
         self._sig_list = QTreeWidget()
