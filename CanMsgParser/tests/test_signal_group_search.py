@@ -5,8 +5,8 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 from widgets.signal_group_panel import SignalGroupPanel, SignalGroup, SignalRef
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -17,18 +17,18 @@ def _iter_signal_items(w):
     items = []
     for i in range(w._sig_list.topLevelItemCount()):
         top = w._sig_list.topLevelItem(i)
-        if top.data(0, Qt.UserRole) is not None:
+        if top.data(0, Qt.ItemDataRole.UserRole) is not None:
             items.append(top)
         for j in range(top.childCount()):
             child = top.child(j)
-            if child.data(0, Qt.UserRole) is not None:
+            if child.data(0, Qt.ItemDataRole.UserRole) is not None:
                 items.append(child)
     return items
 
 
 def _find(w, sig_name):
     for it in _iter_signal_items(w):
-        sr = it.data(0, Qt.UserRole)
+        sr = it.data(0, Qt.ItemDataRole.UserRole)
         if sr is not None and sr.sig_name == sig_name:
             return it
     return None
@@ -88,7 +88,7 @@ def test_group_search_checkbox_reset_on_research():
     """Re-search should reset checked state (single search keeps only current checks)."""
     w = _mk_widget()
     it = _find(w, "SigOne")
-    it.setCheckState(0, Qt.Checked)
+    it.setCheckState(0, Qt.CheckState.Checked)
     assert ("MsgA", "SigOne") in w.get_checked_signals(), "SigOne should be checked"
 
     # Re-search -> list rebuilt, checks cleared

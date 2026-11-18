@@ -57,7 +57,7 @@ def compute_scale(screen=None) -> float:
     :param screen: ``QScreen``；为 None 时取 QApplication 的主屏
     :return: [0.85, 1.25] 区间内的缩放系数；无法取到屏幕时返回 1.0
     """
-    from PyQt5.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication
 
     if screen is None:
         app = QApplication.instance()

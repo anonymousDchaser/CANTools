@@ -14,8 +14,8 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 
 from widgets.signal_tree import SignalTreeWidget
 from widgets.signal_group_panel import SignalGroupPanel
@@ -46,7 +46,7 @@ def test_search_view_single_checkall():
 
     # 取消一个可见信号 -> 全选框自动取消
     sig1 = tree._tree.topLevelItem(0).child(0)
-    sig1.setCheckState(0, Qt.Unchecked)
+    sig1.setCheckState(0, Qt.CheckState.Unchecked)
     tree._on_item_changed(sig1, 0)
     assert tree._check_all_chk.isChecked() is False, "存在未勾选信号时全选框应取消"
     assert len(tree.get_checked_signals()) == 2
@@ -66,11 +66,11 @@ def _iter_group_items(w):
     items = []
     for i in range(w._sig_list.topLevelItemCount()):
         top = w._sig_list.topLevelItem(i)
-        if top.flags() & Qt.ItemIsUserCheckable and top.data(0, Qt.UserRole) is not None:
+        if top.flags() & Qt.ItemFlag.ItemIsUserCheckable and top.data(0, Qt.ItemDataRole.UserRole) is not None:
             items.append(top)
         for j in range(top.childCount()):
             child = top.child(j)
-            if child.flags() & Qt.ItemIsUserCheckable and child.data(0, Qt.UserRole) is not None:
+            if child.flags() & Qt.ItemFlag.ItemIsUserCheckable and child.data(0, Qt.ItemDataRole.UserRole) is not None:
                 items.append(child)
     return items
 
@@ -88,10 +88,10 @@ def test_group_panel_single_checkall():
     assert w._check_all_chk.isChecked() is True, "全选后勾选框应勾选"
     items = _iter_group_items(w)
     assert len(items) == 2 and all(
-        it.checkState(0) == Qt.Checked for it in items), "两个信号均应被勾选"
+        it.checkState(0) == Qt.CheckState.Checked for it in items), "两个信号均应被勾选"
 
     # 取消一个 -> 全选框自动取消
-    items[0].setCheckState(0, Qt.Unchecked)
+    items[0].setCheckState(0, Qt.CheckState.Unchecked)
     w._on_sig_checked(items[0], 0)
     assert w._check_all_chk.isChecked() is False, "存在未勾选信号时全选框应取消"
 
@@ -102,7 +102,7 @@ def test_group_panel_single_checkall():
     # 取消全选框 -> 所有可见取消
     w._check_all_chk.setChecked(False)
     items = _iter_group_items(w)
-    assert all(it.checkState(0) == Qt.Unchecked for it in items), \
+    assert all(it.checkState(0) == Qt.CheckState.Unchecked for it in items), \
         "取消全选框应取消所有可见信号"
     print("    OK: 信号分组 单一全选框勾选/取消/自动联动 正确")
     print("[2] 通过\n")

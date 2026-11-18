@@ -5,12 +5,12 @@
 （+ 移除/加入分组按钮）。两侧各自纵向占满，避免二者在同一纵向布局里平分高度、
 把搜索树挤到只剩一两行。面板较窄时（如停靠在主窗口左侧栏）自动切换为上下堆叠。
 """
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLineEdit, QTreeWidget, QTreeWidgetItem,
     QPushButton, QHBoxLayout, QListWidget, QListWidgetItem,
     QAbstractItemView, QLabel, QCheckBox, QSplitter, QHeaderView,
 )
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt
 from core.can_data import MessageDef
 from widgets.del_key_filter import DelKeyFilter
 from widgets.elided_tooltip import ElidedListWidget, ElidedTreeWidget
@@ -73,7 +73,7 @@ class SignalTreeWidget(QWidget):
         # 旧布局把树与勾选列表纵向堆叠，两者都未设拉伸系数，Qt 会把剩余高度
         # 50/50 平分，再扣掉搜索框/全选/分发/按钮等固定行，树只剩一两行。
         # 改为左右分栏后两侧各自纵向占满，树的行数只取决于面板高度。
-        self._split = QSplitter(Qt.Horizontal)
+        self._split = QSplitter(Qt.Orientation.Horizontal)
         self._split.setChildrenCollapsible(False)
         self._split.setHandleWidth(dp(4))
 
@@ -95,8 +95,8 @@ class SignalTreeWidget(QWidget):
         self._tree.setIndentation(dp(14))
         # 名称列自适应剩余宽度、ID 列按内容自适应：窄面板下不再被固定列宽撑开
         _header = self._tree.header()
-        _header.setSectionResizeMode(0, QHeaderView.Stretch)
-        _header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        _header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        _header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         _header.setStretchLastSection(False)
         self._tree.itemChanged.connect(self._on_item_changed)
         left_layout.addWidget(self._tree, stretch=1)
@@ -136,7 +136,7 @@ class SignalTreeWidget(QWidget):
 
         # ElidedListWidget：行文本被截断时，悬停显示「信号名 + 所属报文」
         self._checked_list = ElidedListWidget()
-        self._checked_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._checked_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._checked_list.setAlternatingRowColors(True)
         self._checked_list.setMinimumWidth(dp(130))
         self._checked_list.setMinimumHeight(dp(60))
@@ -190,14 +190,14 @@ class SignalTreeWidget(QWidget):
         if not hasattr(self, "_split"):
             return
         want = (
-            Qt.Horizontal
+            Qt.Orientation.Horizontal
             if self.width() >= dp(self._SPLIT_FLIP_WIDTH)
-            else Qt.Vertical
+            else Qt.Orientation.Vertical
         )
         if want == self._split.orientation():
             return
         self._split.setOrientation(want)
-        if want == Qt.Horizontal:
+        if want == Qt.Orientation.Horizontal:
             self._split.setSizes([dp(420), dp(280)])
         else:
             self._split.setSizes([dp(300), dp(140)])
@@ -216,15 +216,15 @@ class SignalTreeWidget(QWidget):
             msg_item = QTreeWidgetItem(self._tree)
             msg_item.setText(0, msg.name)
             msg_item.setText(1, f"0x{msg.frame_id:03X}")
-            msg_item.setData(0, Qt.UserRole, msg)
+            msg_item.setData(0, Qt.ItemDataRole.UserRole, msg)
             self._all_items[msg.name] = msg_item
             for sig in msg.signals:
                 sig_item = QTreeWidgetItem(msg_item)
                 sig_item.setText(0, sig.name)
                 sig_item.setText(1, sig.unit)
-                sig_item.setFlags(sig_item.flags() | Qt.ItemIsUserCheckable)
-                sig_item.setCheckState(0, Qt.Unchecked)
-                sig_item.setData(0, Qt.UserRole, sig)
+                sig_item.setFlags(sig_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                sig_item.setCheckState(0, Qt.CheckState.Unchecked)
+                sig_item.setData(0, Qt.ItemDataRole.UserRole, sig)
         self._tree.blockSignals(False)
         self._refresh_checked_list()
 
@@ -235,7 +235,7 @@ class SignalTreeWidget(QWidget):
             msg_name = msg_item.text(0)
             for j in range(msg_item.childCount()):
                 sig_item = msg_item.child(j)
-                if sig_item.checkState(0) == Qt.Checked:
+                if sig_item.checkState(0) == Qt.CheckState.Checked:
                     result.append((msg_name, sig_item.text(0)))
         return result
 
@@ -249,7 +249,7 @@ class SignalTreeWidget(QWidget):
                 sig_item = msg_item.child(j)
                 if sig_item.text(0) == sig_name:
                     self._tree.blockSignals(True)
-                    sig_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+                    sig_item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
                     self._tree.blockSignals(False)
                     self._on_item_changed(None, 0)
                     return
@@ -290,7 +290,7 @@ class SignalTreeWidget(QWidget):
             msg_item = self._tree.topLevelItem(i)
             msg_name = msg_item.text(0).lower()
             msg_id_text = msg_item.text(1).lower()  # "0x1a0" 等
-            msg_def = msg_item.data(0, Qt.UserRole)
+            msg_def = msg_item.data(0, Qt.ItemDataRole.UserRole)
 
             # 按名称匹配（始终生效）
             name_match = text_lower in msg_name
@@ -338,7 +338,7 @@ class SignalTreeWidget(QWidget):
         pairs = self.get_checked_signals()
         for msg_name, sig_name in pairs:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.UserRole, (msg_name, sig_name))
+            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
             # 右列较窄时文本仍可能被截断，悬停可见完整「信号名 + 所属报文」
             item.setToolTip(f"{sig_name}\n所属报文: {msg_name}")
             self._checked_list.addItem(item)
@@ -352,7 +352,7 @@ class SignalTreeWidget(QWidget):
         即使目标信号因当前搜索被隐藏，set_signal_checked 仍会遍历所有项
         找到并取消其勾选，随后触发的 _on_item_changed 会刷新本列表。
         """
-        pairs = [item.data(Qt.UserRole) for item in self._checked_list.selectedItems()]
+        pairs = [item.data(Qt.ItemDataRole.UserRole) for item in self._checked_list.selectedItems()]
         for msg_name, sig_name in pairs:
             self.set_signal_checked(msg_name, sig_name, False)
 
@@ -369,9 +369,9 @@ class SignalTreeWidget(QWidget):
             msg_item = self._tree.topLevelItem(i)
             for j in range(msg_item.childCount()):
                 sig_item = msg_item.child(j)
-                if (sig_item.flags() & Qt.ItemIsUserCheckable) and not sig_item.isHidden():
+                if (sig_item.flags() & Qt.ItemFlag.ItemIsUserCheckable) and not sig_item.isHidden():
                     total += 1
-                    if sig_item.checkState(0) == Qt.Checked:
+                    if sig_item.checkState(0) == Qt.CheckState.Checked:
                         checked += 1
         self._check_all_chk.blockSignals(True)
         self._check_all_chk.setChecked(total > 0 and checked == total)
@@ -384,7 +384,7 @@ class SignalTreeWidget(QWidget):
             msg_item = self._tree.topLevelItem(i)
             for j in range(msg_item.childCount()):
                 sig_item = msg_item.child(j)
-                if (sig_item.flags() & Qt.ItemIsUserCheckable) and not sig_item.isHidden():
-                    sig_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+                if (sig_item.flags() & Qt.ItemFlag.ItemIsUserCheckable) and not sig_item.isHidden():
+                    sig_item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         self._tree.blockSignals(False)
         self._on_item_changed(None, 0)

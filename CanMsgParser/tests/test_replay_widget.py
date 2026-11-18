@@ -5,7 +5,8 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
 import can
 from widgets.replay_widget import ReplayWidget
 
@@ -87,7 +88,7 @@ def test_replay_filters_and_sends():
 
     # 仅勾选 0x100 -> 只发该 ID 的 2 帧
     bus.sent.clear()
-    w._id_list.item(1).setCheckState(0)  # 取消 0x200
+    w._id_list.item(1).setCheckState(Qt.CheckState.Unchecked)  # 取消 0x200
     w._start_replay()
     _pump(w, seconds=3.0)
     assert len(bus.sent) == 2, f"仅 0x100 应发 2 帧，实际 {len(bus.sent)}"
@@ -208,8 +209,8 @@ def test_replay_dispatch_fanout():
 def test_replay_accepts_drop():
     """拖入日志文件：本页识别为可回放报文，.asc/.blf 再通知主窗口分析。"""
     import tempfile
-    from PyQt5.QtCore import QMimeData, QUrl, QPointF, Qt
-    from PyQt5.QtGui import QDropEvent
+    from PyQt6.QtCore import QMimeData, QUrl, QPointF, Qt
+    from PyQt6.QtGui import QDropEvent
 
     fd, asc = tempfile.mkstemp(suffix=".asc")
     os.close(fd)
@@ -226,8 +227,8 @@ def test_replay_accepts_drop():
     def _drop(path):
         md = QMimeData()
         md.setUrls([QUrl.fromLocalFile(path)])
-        ev = QDropEvent(QPointF(10, 10), Qt.CopyAction, md,
-                        Qt.LeftButton, Qt.NoModifier)
+        ev = QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, md,
+                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
         # 返回 mime 一起持有：QDropEvent 不接管 QMimeData 的所有权，
         # 只返回事件时 mime 会被 GC 掉，Qt 侧留下野指针（实测静默退出）。
         return ev, md

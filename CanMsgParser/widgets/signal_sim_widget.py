@@ -20,15 +20,15 @@
 
 通道/波特率不再由本页设置，统一由「连接状态」页提供（set_connection）。
 """
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QLabel,
     QMessageBox, QAbstractItemView, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QSpinBox, QCheckBox,
     QLineEdit, QPlainTextEdit, QHeaderView, QComboBox, QTreeWidget,
     QTreeWidgetItem, QInputDialog,
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QColor
+from PyQt6.QtCore import Qt, QSize, QTimer, QThread, pyqtSignal
+from PyQt6.QtGui import QColor
 
 import can
 import re
@@ -123,12 +123,12 @@ class _HexEditor(QPlainTextEdit):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
         self.setPlainText(text)
-        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         # Tab 交给焦点链（在多行编辑框里插入制表符没有意义）
         self.setTabChangesFocus(True)
         # 水平方向不滚动：靠自动换行显示完整字节串
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setFixedHeight(dp(54))
 
     def text(self) -> str:
@@ -457,7 +457,7 @@ class SignalSimWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
 
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # ─── 左侧：已选信号列表 ───
         left = QWidget()
@@ -467,7 +467,7 @@ class SignalSimWidget(QWidget):
         left_layout.addWidget(QLabel("已选信号（可删除）:"))
         # ElidedListWidget：行文本被截断时，悬停显示完整内容
         self._sel_list = ElidedListWidget()
-        self._sel_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._sel_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._sel_list.setAlternatingRowColors(True)
         left_layout.addWidget(self._sel_list, stretch=1)
         sel_bar = QHBoxLayout()
@@ -521,14 +521,14 @@ class SignalSimWidget(QWidget):
             "手动值 / 所有信号", "自动递增", "状态 / 组状态", "详情", "操作",
         ])
         hdr = self._value_table.header()
-        hdr.setSectionResizeMode(COL_SIG, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(COL_FORMULA, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(COL_VALUE, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(COL_MANUAL, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(COL_RAMP, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(COL_DETAIL, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(COL_ACTION, QHeaderView.Fixed)
+        hdr.setSectionResizeMode(COL_SIG, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(COL_FORMULA, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(COL_VALUE, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(COL_MANUAL, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(COL_RAMP, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(COL_DETAIL, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(COL_ACTION, QHeaderView.ResizeMode.Fixed)
         self._value_table.setColumnWidth(COL_SIG, dp(200))
         self._value_table.setColumnWidth(COL_VALUE, dp(150))
         # 组行的「所有信号」勾选框也放在该列，宽度需容得下四字 + 指示器
@@ -536,7 +536,7 @@ class SignalSimWidget(QWidget):
         self._value_table.setColumnWidth(COL_DETAIL, 160)
         # 原始报文组在该列放「发送/停止 + 删除」两个按钮，故留出双按钮宽度
         self._value_table.setColumnWidth(COL_ACTION, dp(108))
-        self._value_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._value_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._value_table.setAlternatingRowColors(True)
         # 行高：setItemWidget 放入的控件高度 = 行高 - 上下 padding。
         # 原来 min-height:24px + padding:5px 只给下拉框留 24px，而 QComboBox
@@ -721,7 +721,7 @@ class SignalSimWidget(QWidget):
             if grp is None:
                 grp_item = QTreeWidgetItem(self._value_table)
                 grp_item.setText(COL_SIG, f"报文组 0x{frame_id:03X}  {msg_name}")
-                grp_item.setData(COL_SIG, Qt.UserRole, frame_id)
+                grp_item.setData(COL_SIG, Qt.ItemDataRole.UserRole, frame_id)
                 # 组周期（组内所有信号共享）
                 cycle_spin = QSpinBox()
                 cycle_spin.setRange(10, 5000)
@@ -766,7 +766,7 @@ class SignalSimWidget(QWidget):
             # ── 信号子行 ──
             row = QTreeWidgetItem(grp["item"])
             row.setText(COL_SIG, f"{sig_name}  ({msg_name})")
-            row.setData(COL_SIG, Qt.UserRole, key)
+            row.setData(COL_SIG, Qt.ItemDataRole.UserRole, key)
 
             row.setText(COL_FORMULA, self._formula_text(sdef) if sdef else "")
             row.setText(COL_DETAIL, "")
@@ -898,7 +898,7 @@ class SignalSimWidget(QWidget):
         self._sel_list.clear()
         for msg_name, sig_name in sorted(self._sel_signals):
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.UserRole, (msg_name, sig_name))
+            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
             self._sel_list.addItem(item)
         self._sel_list.blockSignals(False)
 
@@ -938,7 +938,7 @@ class SignalSimWidget(QWidget):
             if grp_item is not None:
                 for ci in range(grp_item.childCount()):
                     child = grp_item.child(ci)
-                    if child.data(COL_SIG, Qt.UserRole) == key:
+                    if child.data(COL_SIG, Qt.ItemDataRole.UserRole) == key:
                         grp_item.takeChild(ci)
                         break
         # 组内已无「用户已选」信号时整组销毁：否则勾了「所有信号」的组在用户
@@ -957,7 +957,7 @@ class SignalSimWidget(QWidget):
         self._refresh_sel_list()
 
     def _remove_selected(self):
-        keys = {item.data(Qt.UserRole) for item in self._sel_list.selectedItems()}
+        keys = {item.data(Qt.ItemDataRole.UserRole) for item in self._sel_list.selectedItems()}
         if not keys:
             return
         self._sel_signals -= keys
@@ -1063,7 +1063,7 @@ class SignalSimWidget(QWidget):
         if msg_name:
             title += f"  {msg_name}"
         grp_item.setText(COL_SIG, title)
-        grp_item.setData(COL_SIG, Qt.UserRole, frame_id)
+        grp_item.setData(COL_SIG, Qt.ItemDataRole.UserRole, frame_id)
         grp_item.setText(COL_FORMULA, f"原始数据（{dlc} 字节）")
         grp_item.setToolTip(
             COL_SIG,
@@ -1409,9 +1409,9 @@ class SignalSimWidget(QWidget):
         reply = QMessageBox.question(
             self, "确认删除",
             f"确定删除原始报文组 0x{frame_id:03X} 及其原始数据吗？",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
         grp["sending"] = False
         if self._worker is not None:

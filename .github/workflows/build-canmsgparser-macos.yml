@@ -45,8 +45,8 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # 与 README「macOS 环境搭建」建议保持一致：PyQt5 5.15.11 官方支持到
-          # 3.12，更保守的版本能避免 CI 因 wheel 缺失而失败。
+          # 与 README「macOS 环境搭建」建议保持一致：PyQt6 6.12 覆盖 3.9–3.13，
+          # 这里固定 3.12，避免 CI 因 wheel 缺失而失败。
           python-version: "3.12"
 
       - name: 安装依赖

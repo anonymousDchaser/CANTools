@@ -20,12 +20,12 @@
 import os
 import time
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QListWidget, QListWidgetItem, QAbstractItemView, QGroupBox, QSpinBox,
     QCheckBox, QComboBox, QLineEdit, QProgressBar, QMessageBox,
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 import can
 
@@ -137,7 +137,7 @@ class ReplayWidget(QWidget):
         self._ui_ts = 0.0              # 上次刷新进度标签的时刻
         # 常驻定时器：一个定时器反复触发，不再每帧新建 QTimer
         self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(1)
         self._timer.timeout.connect(self._on_tick)
         # 接受把日志文件直接拖到本页（与拖到主窗口等价，见 dropEvent）
@@ -235,7 +235,7 @@ class ReplayWidget(QWidget):
         id_bar.addStretch()
         id_layout.addLayout(id_bar)
         self._id_list = QListWidget()
-        self._id_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._id_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._id_list.setAlternatingRowColors(True)
         id_layout.addWidget(self._id_list)
         layout.addWidget(id_group, stretch=1)
@@ -428,24 +428,24 @@ class ReplayWidget(QWidget):
             if msg_name:
                 text += f"  {msg_name}"
             item = QListWidgetItem(text)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            item.setData(Qt.UserRole, fid)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, fid)
             self._id_list.addItem(item)
         self._id_list.blockSignals(False)
 
     def _set_all_ids(self, checked: bool):
         for i in range(self._id_list.count()):
             self._id_list.item(i).setCheckState(
-                Qt.Checked if checked else Qt.Unchecked
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
             )
 
     def _checked_ids(self) -> set:
         ids = set()
         for i in range(self._id_list.count()):
             item = self._id_list.item(i)
-            if item.checkState() == Qt.Checked:
-                ids.add(item.data(Qt.UserRole))
+            if item.checkState() == Qt.CheckState.Checked:
+                ids.add(item.data(Qt.ItemDataRole.UserRole))
         return ids
 
     # ────────────────────── 回放控制 ──────────────────────

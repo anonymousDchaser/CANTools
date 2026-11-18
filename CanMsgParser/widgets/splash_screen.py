@@ -1,12 +1,12 @@
 # widgets/splash_screen.py
 """启动画面 — 带小车和坐标图的优美启动界面"""
 import math
-from PyQt5.QtWidgets import QSplashScreen, QApplication
-from PyQt5.QtGui import (
+from PyQt6.QtWidgets import QSplashScreen, QApplication
+from PyQt6.QtGui import (
     QPixmap, QPainter, QColor, QPen, QBrush, QFont,
     QLinearGradient, QPainterPath,
 )
-from PyQt5.QtCore import Qt, QRectF, QPointF
+from PyQt6.QtCore import Qt, QRectF, QPointF
 from utils.font_helper import ui_font
 from version import APP_VERSION
 
@@ -20,11 +20,11 @@ class SplashScreen(QSplashScreen):
     def __init__(self):
         # 创建透明背景的 pixmap
         pixmap = QPixmap(self.SPLASH_W, self.SPLASH_H)
-        pixmap.fill(Qt.transparent)
+        pixmap.fill(Qt.GlobalColor.transparent)
         super().__init__(pixmap)
 
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.SplashScreen | Qt.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint
         )
         self._progress = 0
         self._status_text = "正在初始化..."
@@ -37,9 +37,9 @@ class SplashScreen(QSplashScreen):
     def _draw(self):
         """重绘整个启动画面"""
         pixmap = QPixmap(self.SPLASH_W, self.SPLASH_H)
-        pixmap.fill(Qt.transparent)
+        pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # 1. 背景圆角矩形 + 渐变
         self._draw_background(painter)
@@ -84,7 +84,7 @@ class SplashScreen(QSplashScreen):
         font = ui_font(22, bold=True)
         painter.setFont(font)
         painter.drawText(
-            QRectF(0, 20, self.SPLASH_W, 40), Qt.AlignCenter, "CAN 报文分析工具"
+            QRectF(0, 20, self.SPLASH_W, 40), Qt.AlignmentFlag.AlignCenter, "CAN 报文分析工具"
         )
 
         # 副标题
@@ -93,7 +93,7 @@ class SplashScreen(QSplashScreen):
         painter.setFont(font)
         painter.drawText(
             QRectF(0, 58, self.SPLASH_W, 20),
-            Qt.AlignCenter,
+            Qt.AlignmentFlag.AlignCenter,
             "CAN Bus Message Analysis Tool  "
             f"v{APP_VERSION}",
         )
@@ -137,7 +137,7 @@ class SplashScreen(QSplashScreen):
 
         # 轮毂
         painter.setBrush(QBrush(QColor("#555555")))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QRectF(32, 67, 14, 14))
         painter.drawEllipse(QRectF(114, 67, 14, 14))
 
@@ -147,7 +147,7 @@ class SplashScreen(QSplashScreen):
 
         # CAN 信号波纹（车上方）
         painter.setPen(QPen(QColor("#4fc3f7"), 1.5))
-        painter.setBrush(Qt.NoBrush)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         for i in range(3):
             painter.drawArc(
                 QRectF(70 - i * 8, -10 - i * 5, 16 + i * 16, 16 + i * 16),
@@ -171,7 +171,7 @@ class SplashScreen(QSplashScreen):
         painter.drawLine(10, h - 10, w - 10, h - 10)   # X 轴
 
         # 网格线
-        painter.setPen(QPen(QColor("#333333"), 1, Qt.DashLine))
+        painter.setPen(QPen(QColor("#333333"), 1, Qt.PenStyle.DashLine))
         for i in range(1, 5):
             y_line = int(10 + i * (h - 20) / 5)
             painter.drawLine(10, y_line, w - 10, y_line)
@@ -204,7 +204,7 @@ class SplashScreen(QSplashScreen):
 
         # 数据点
         painter.setBrush(QBrush(accent))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         for i in range(0, w - 20, 25):
             py = h / 2 + 30 * math.sin(i * 0.08)
             painter.drawEllipse(QPointF(10 + i, py), 3, 3)
@@ -212,8 +212,8 @@ class SplashScreen(QSplashScreen):
         # 轴标签
         painter.setPen(QColor("#888888"))
         painter.setFont(ui_font(7))
-        painter.drawText(QRectF(-5, 5, 20, 15), Qt.AlignCenter, "V")
-        painter.drawText(QRectF(w - 15, h - 8, 20, 15), Qt.AlignCenter, "t")
+        painter.drawText(QRectF(-5, 5, 20, 15), Qt.AlignmentFlag.AlignCenter, "V")
+        painter.drawText(QRectF(w - 15, h - 8, 20, 15), Qt.AlignmentFlag.AlignCenter, "t")
 
         painter.restore()
 
@@ -224,7 +224,7 @@ class SplashScreen(QSplashScreen):
 
         # 背景槽
         painter.setBrush(QBrush(QColor("#333333")))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 4, 4)
 
         # 已完成的进度
@@ -245,7 +245,7 @@ class SplashScreen(QSplashScreen):
         painter.setFont(ui_font(9))
         painter.drawText(
             QRectF(40, self.SPLASH_H - 75, 400, 20),
-            Qt.AlignLeft,
+            Qt.AlignmentFlag.AlignLeft,
             self._status_text,
         )
 
@@ -254,7 +254,7 @@ class SplashScreen(QSplashScreen):
         painter.setFont(ui_font(10, bold=True))
         painter.drawText(
             QRectF(self.SPLASH_W - 140, self.SPLASH_H - 75, 100, 20),
-            Qt.AlignRight,
+            Qt.AlignmentFlag.AlignRight,
             f"{self._progress}%",
         )
 
@@ -263,7 +263,7 @@ class SplashScreen(QSplashScreen):
         painter.setFont(ui_font(7))
         painter.drawText(
             QRectF(40, self.SPLASH_H - 22, self.SPLASH_W - 80, 15),
-            Qt.AlignLeft,
+            Qt.AlignmentFlag.AlignLeft,
             "作者: laizhenxin  |  lzxDchaser@126.com",
         )
 

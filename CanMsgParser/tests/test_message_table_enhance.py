@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 import cantools
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 
 from widgets.message_table import MessageTableWidget
 
@@ -83,7 +83,7 @@ def _child_map(model, frame_idx):
     model.fetchMore(idx)
     n = model.rowCount(idx)
     return {
-        model.data(model.index(i, 1, idx), Qt.DisplayRole): i
+        model.data(model.index(i, 1, idx), Qt.ItemDataRole.DisplayRole): i
         for i in range(n)
     }, idx
 
@@ -118,20 +118,20 @@ def test_message_table_hex_and_desc():
     dm = cmap["TCU_Drivemode"]
     sp = cmap["Speed"]
     # 十六进制值列（左侧）
-    assert w._model.data(w._model.index(dm, 2, idx), Qt.DisplayRole) == "0x1", \
+    assert w._model.data(w._model.index(dm, 2, idx), Qt.ItemDataRole.DisplayRole) == "0x1", \
         f"TCU_Drivemode 十六进制列应为 '0x1'"
     # 十进制值列（含枚举名）
-    assert w._model.data(w._model.index(dm, 3, idx), Qt.DisplayRole) == "1 (前进)", \
+    assert w._model.data(w._model.index(dm, 3, idx), Qt.ItemDataRole.DisplayRole) == "1 (前进)", \
         f"TCU_Drivemode 十进制列应为 '1 (前进)'"
     # 信号描述列（DBC choices 优先）
-    assert w._model.data(w._model.index(dm, 5, idx), Qt.DisplayRole) == "前进", \
+    assert w._model.data(w._model.index(dm, 5, idx), Qt.ItemDataRole.DisplayRole) == "前进", \
         f"TCU_Drivemode 描述列应为 '前进'"
     # Speed：十六进制 + 十进制 + 无描述
-    assert w._model.data(w._model.index(sp, 2, idx), Qt.DisplayRole) == "0x64", \
+    assert w._model.data(w._model.index(sp, 2, idx), Qt.ItemDataRole.DisplayRole) == "0x64", \
         f"Speed 十六进制列应为 '0x64'"
-    assert w._model.data(w._model.index(sp, 3, idx), Qt.DisplayRole) == "10.0", \
+    assert w._model.data(w._model.index(sp, 3, idx), Qt.ItemDataRole.DisplayRole) == "10.0", \
         f"Speed 十进制列应为 '10.0'"
-    assert w._model.data(w._model.index(sp, 5, idx), Qt.DisplayRole) == "", \
+    assert w._model.data(w._model.index(sp, 5, idx), Qt.ItemDataRole.DisplayRole) == "", \
         f"Speed 无描述应为空"
     print("    OK: 十六进制/十进制/描述列均正确（DBC choices 优先）")
 
@@ -141,7 +141,7 @@ def test_message_table_hex_and_desc():
     w.set_value_descriptions({"TCU_Drivemode": {1: "Excel前进"}})
     cmap2, idx2 = _child_map(w._model, 0)
     dm2 = cmap2["TCU_Drivemode"]
-    assert w._model.data(w._model.index(dm2, 5, idx2), Qt.DisplayRole) == "Excel前进", \
+    assert w._model.data(w._model.index(dm2, 5, idx2), Qt.ItemDataRole.DisplayRole) == "Excel前进", \
         f"Excel 兜底应显示 'Excel前进'"
     print("    OK: Excel 表描述兜底生效")
     print("[A] 通过\n")

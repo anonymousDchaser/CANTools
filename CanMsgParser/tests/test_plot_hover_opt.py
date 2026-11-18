@@ -26,7 +26,7 @@ if _PROJECT_ROOT not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 
 _app = QApplication.instance() or QApplication(sys.argv)
 

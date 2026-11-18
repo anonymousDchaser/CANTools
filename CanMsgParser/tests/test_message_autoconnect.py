@@ -6,7 +6,7 @@
 import sys
 import time
 
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 
 import can
 from core.can_connection import CanConnectionManager

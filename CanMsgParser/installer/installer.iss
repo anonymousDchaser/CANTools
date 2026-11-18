@@ -19,7 +19,7 @@
 ;   ISCC.exe /DMyAppVersion=<version.py 里的 APP_VERSION> installer.iss
 ; 覆盖，避免安装包与窗口标题两处版本各说各话。
 #ifndef MyAppVersion
-  #define MyAppVersion "1.4.0"
+  #define MyAppVersion "1.5.0"
 #endif
 #define MyAppPublisher "lzxDChaser"
 #define MyAppExeName "CanMsgParser.exe"

@@ -23,7 +23,7 @@ else:
 # stderr 再退出，日志里就能直接看到卡住的函数。
 SMOKE_TIMEOUT = int(os.environ.get("SMOKE_TIMEOUT", "90"))
 
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 
 # 必须在创建 QApplication 后导入（部分模块依赖 Qt 应用上下文）
 import main_window

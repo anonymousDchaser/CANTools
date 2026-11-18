@@ -5,7 +5,7 @@ import os
 import tempfile
 
 import cantools
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 
 from core.can_data import MessageDef
 from widgets.realtime_message_widget import RealtimeMessageWidget

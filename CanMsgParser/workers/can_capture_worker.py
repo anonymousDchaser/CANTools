@@ -6,14 +6,14 @@
   主线程创建并保持唯一一条；所有帧由管理器唯一的收帧线程 fan-out 出来，
   本处理器作为监听者被回调 process_message(msg) 处理。
 - 解码后的采样点通过 sample_received 信号回传 GUI 线程（控件以
-  Qt.QueuedConnection 连接，Qt 自动排队到 GUI 线程执行）。
+  Qt.ConnectionType.QueuedConnection 连接，Qt 自动排队到 GUI 线程执行）。
 - 本类为普通 QObject（非线程），重活（解码）在管理器的收帧线程内同步完成，
   信号发射以队列方式回到 GUI，避免跨线程直接操作界面。
 """
 import time
 import threading
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.can_utils import load_dbc, build_signal_slots, decode_frame
 

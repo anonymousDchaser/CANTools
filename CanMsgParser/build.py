@@ -15,7 +15,7 @@
 关键点:
     - --windowed / --noconsole: 不弹出控制台窗口
     - --collect-data matplotlib: 捆绑 matplotlib 的数据文件（字体/样式等）
-    - --hidden-import: 补齐动态导入的库（cantools / python-can / PyQt5.sip 等）
+    - --hidden-import: 补齐动态导入的库（cantools / python-can / PyQt6.sip 等）
     - 平台专属选项必须按平台传参，否则在另一平台会因无法识别而直接失败：
       Windows 的 --manifest / --noconsole，macOS 的 --osx-bundle-identifier。
 
@@ -147,12 +147,12 @@ def build_cmd():
 
     cmd += [
         # 隐藏导入 — 这些库有动态导入，PyInstaller 可能漏掉
-        "--hidden-import", "PyQt5.QtCore",
-        "--hidden-import", "PyQt5.QtGui",
-        "--hidden-import", "PyQt5.QtWidgets",
-        "--hidden-import", "PyQt5.sip",
-        "--hidden-import", "matplotlib.backends.backend_qt5agg",
-        "--hidden-import", "matplotlib.backends.backend_qt5",
+        "--hidden-import", "PyQt6.QtCore",
+        "--hidden-import", "PyQt6.QtGui",
+        "--hidden-import", "PyQt6.QtWidgets",
+        "--hidden-import", "PyQt6.sip",
+        "--hidden-import", "matplotlib.backends.backend_qtagg",
+        "--hidden-import", "matplotlib.backends.backend_qt",
         "--hidden-import", "cantools",
         "--hidden-import", "can",
         "--hidden-import", "can.io.blf",       # python-can 4.x: BLF 日志读写
@@ -191,8 +191,8 @@ def build_cmd():
         #    （ModuleNotFoundError: No module named 'unittest'）。它本身只有几百 KB。
         "--exclude-module", "tkinter",
         "--exclude-module", "pydoc_data",
-        "--exclude-module", "PyQt5.QtWebEngineCore",
-        "--exclude-module", "PyQt5.QtWebEngineWidgets",
+        "--exclude-module", "PyQt6.QtWebEngineCore",
+        "--exclude-module", "PyQt6.QtWebEngineWidgets",
     ]
 
     # 图标

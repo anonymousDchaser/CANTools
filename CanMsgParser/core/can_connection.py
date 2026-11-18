@@ -11,7 +11,7 @@
 - 用户忘了在「连接状态」页点连接，各页点击动作时通过 ensure_connected
   自动连接设备再执行相应动作。
 """
-from PyQt5.QtCore import QObject, pyqtSignal, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
 import can
 

@@ -15,7 +15,7 @@ import tempfile
 import os
 
 import pytest
-from PyQt5.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication
 
 import can
 from core.can_connection import CanConnectionManager

@@ -3,12 +3,12 @@
 import importlib
 import subprocess
 import sys
-from PyQt5.QtWidgets import QMessageBox, QApplication
+from PyQt6.QtWidgets import QMessageBox, QApplication
 
 
 # 必需的依赖库: (import名, pip包名)
 REQUIRED_PACKAGES = [
-    ("PyQt5", "PyQt5"),
+    ("PyQt6", "PyQt6"),
     ("matplotlib", "matplotlib"),
     ("cantools", "cantools"),
     ("can", "python-can"),
@@ -97,11 +97,11 @@ def ensure_dependencies(app: QApplication) -> bool:
         None,
         "依赖库缺失",
         message,
-        QMessageBox.Yes | QMessageBox.No,
-        QMessageBox.Yes,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
     )
 
-    if reply != QMessageBox.Yes:
+    if reply != QMessageBox.StandardButton.Yes:
         return False
 
     # 逐个安装

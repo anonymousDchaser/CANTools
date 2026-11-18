@@ -12,9 +12,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtCore import Qt, QPoint
-from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
 
 from widgets.multi_select_filter import MultiSelectIdFilter
 
@@ -58,7 +58,7 @@ def _click_row(flt, row: int, x: int):
     lst = flt._list
     item = lst.item(row)
     rect = lst.visualRect(lst.indexFromItem(item))
-    QTest.mouseClick(lst.viewport(), Qt.LeftButton, Qt.NoModifier,
+    QTest.mouseClick(lst.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                      QPoint(x, rect.center().y()))
     QApplication.processEvents()
     return item
@@ -71,7 +71,7 @@ def _visible(flt):
         item = flt._list.item(i)
         if item.isHidden():
             continue
-        data = item.data(Qt.UserRole)
+        data = item.data(Qt.ItemDataRole.UserRole)
         out.append(None if data is None else int(data))
     return out
 
@@ -115,22 +115,22 @@ class TestSearchFilter:
 class TestSearchSubmit:
     def test_enter_toggles_single_match(self, flt):
         _type(flt, "0x2C0")
-        QTest.keyClick(flt._search, Qt.Key_Return)
+        QTest.keyClick(flt._search, Qt.Key.Key_Return)
         assert flt.selected_ids() == [0x2C0]
-        QTest.keyClick(flt._search, Qt.Key_Return)
+        QTest.keyClick(flt._search, Qt.Key.Key_Return)
         assert flt.selected_ids() == []
 
     def test_enter_emits_selection_changed(self, flt):
         seen = []
         flt.selectionChanged.connect(lambda: seen.append(1))
         _type(flt, "0x2C0")
-        QTest.keyClick(flt._search, Qt.Key_Return)
+        QTest.keyClick(flt._search, Qt.Key.Key_Return)
         assert len(seen) == 1
 
     def test_enter_with_multiple_matches_does_nothing(self, flt):
         _type(flt, "1")
         assert len(_visible(flt)) > 1
-        QTest.keyClick(flt._search, Qt.Key_Return)
+        QTest.keyClick(flt._search, Qt.Key.Key_Return)
         assert flt.selected_ids() == []
 
 
@@ -164,35 +164,35 @@ class TestRowClickToggle:
         flt = shown
         _click_row(flt, 0, 150)          # 点「全部」行中部，制造残留 press 状态
         item = flt._list.item(1)         # 0x1A0
-        assert item.checkState() == Qt.Unchecked
+        assert item.checkState() == Qt.CheckState.Unchecked
         _click_row(flt, 1, 15)           # 点该行复选框
-        assert item.checkState() == Qt.Checked, "点复选框应能勾选"
+        assert item.checkState() == Qt.CheckState.Checked, "点复选框应能勾选"
 
     @pytest.mark.parametrize("x", [4, 10, 15, 24, 150])
     def test_click_anywhere_toggles(self, shown, x):
         flt = shown
         _click_row(flt, 0, 150)          # 先做一次整行点击
         item = _click_row(flt, 1, x)
-        assert item.checkState() == Qt.Checked, "点 x=%d 应勾选" % x
+        assert item.checkState() == Qt.CheckState.Checked, "点 x=%d 应勾选" % x
         _click_row(flt, 1, x)
-        assert item.checkState() == Qt.Unchecked, "再点 x=%d 应取消" % x
+        assert item.checkState() == Qt.CheckState.Unchecked, "再点 x=%d 应取消" % x
 
     def test_other_row_checkbox_after_dirty_state(self, shown):
         """已勾选行被再次点击后（残留状态=已勾选），另一行的复选框仍要能勾上。"""
         flt = shown
         _click_row(flt, 1, 150)          # 0x1A0 勾上
-        assert flt._list.item(1).checkState() == Qt.Checked
+        assert flt._list.item(1).checkState() == Qt.CheckState.Checked
         _click_row(flt, 1, 150)          # 再点一次取消，残留 press 状态=已勾选
         item = _click_row(flt, 2, 15)    # 点 0x1A1 的复选框
-        assert item.checkState() == Qt.Checked, "0x1A1 应被勾选"
-        assert flt._list.item(1).checkState() == Qt.Unchecked
+        assert item.checkState() == Qt.CheckState.Checked, "0x1A1 应被勾选"
+        assert flt._list.item(1).checkState() == Qt.CheckState.Unchecked
         assert flt.selected_ids() == [0x1A1]
 
     def test_all_row_still_restores_when_unchecked(self, shown):
         """「全部」行被点击取消勾选时，仍应自动恢复（不允许空筛选）。"""
         flt = shown
         item = _click_row(flt, 0, 150)
-        assert item.checkState() == Qt.Checked
+        assert item.checkState() == Qt.CheckState.Checked
         assert flt.selected_ids() == []
 
 
@@ -217,7 +217,7 @@ class TestMessageTableSearchToFilter:
         assert table._model.rowCount() == 5
 
         id_filter = table._id_filter
-        ids = [id_filter._list.item(i).data(Qt.UserRole)
+        ids = [id_filter._list.item(i).data(Qt.ItemDataRole.UserRole)
                for i in range(id_filter._list.count())
                if not id_filter._list.item(i).isHidden()]
         assert ids == [None, 0x1A0, 0x1A1], "候选 ID 应按升序注入"
@@ -225,16 +225,16 @@ class TestMessageTableSearchToFilter:
         # 搜到 0x1A1 后整行勾选（不依赖小方块命中）-> 表格立即按 ID 过滤
         _type(id_filter, "1A1")
         row = [i for i in range(id_filter._list.count())
-               if id_filter._list.item(i).data(Qt.UserRole) == 0x1A1][0]
-        id_filter._list.item(row).setCheckState(Qt.Checked)
+               if id_filter._list.item(i).data(Qt.ItemDataRole.UserRole) == 0x1A1][0]
+        id_filter._list.item(row).setCheckState(Qt.CheckState.Checked)
         assert table._model.rowCount() == 2, "0x1A1 出现 2 次"
 
         # 继续搜索并追加勾选，形成多 ID 过滤
         id_filter._search.clear()
         _type(id_filter, "1A0")
         row0 = [i for i in range(id_filter._list.count())
-                if id_filter._list.item(i).data(Qt.UserRole) == 0x1A0][0]
-        id_filter._list.item(row0).setCheckState(Qt.Checked)
+                if id_filter._list.item(i).data(Qt.ItemDataRole.UserRole) == 0x1A0][0]
+        id_filter._list.item(row0).setCheckState(Qt.CheckState.Checked)
         assert table._model.rowCount() == 5, "两个 ID 合计 5 帧"
         assert id_filter.selected_ids() == [0x1A0, 0x1A1]
 

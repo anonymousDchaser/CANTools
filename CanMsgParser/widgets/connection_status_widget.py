@@ -7,11 +7,11 @@
 - CAN 总线连接：通道 / 波特率下拉 + 连接 / 断开按钮 + 状态显示，
   作为模拟上报 / 实时监控 / 实时报文三页共用的通道波特率唯一来源。
 """
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QComboBox, QFileDialog, QMessageBox,
 )
-from PyQt5.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 
 from core.can_utils import (
     DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE,

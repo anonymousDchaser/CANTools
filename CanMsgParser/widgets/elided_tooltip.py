@@ -22,8 +22,8 @@ widgets/drag_reorder_list.py 的行首眼睛图标 + 行尾拖拽把手），可
 上实现 ``reserved_text_inset(index) -> int``，本 Mixin 会自动扣除，避免出现
 「明明被截断却不提示」。
 """
-from PyQt5.QtCore import Qt, QEvent
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, QEvent
+from PyQt6.QtWidgets import (
     QListWidget, QStyleOptionViewItem, QToolTip, QTreeWidget,
 )
 
@@ -39,7 +39,7 @@ class ElidedToolTipMixin:
 
     def viewportEvent(self, event):
         # 只接管 ToolTip，其余事件原样交给 Qt
-        if event.type() == QEvent.ToolTip and self._show_elided_tooltip(event):
+        if event.type() == QEvent.Type.ToolTip and self._show_elided_tooltip(event):
             return True
         return super().viewportEvent(event)
 
@@ -50,9 +50,9 @@ class ElidedToolTipMixin:
         index = self.indexAt(event.pos())
         if not index.isValid() or not self._elide_is_truncated(index):
             return False
-        tip = index.data(Qt.ToolTipRole)
+        tip = index.data(Qt.ItemDataRole.ToolTipRole)
         if not isinstance(tip, str) or not tip.strip():
-            tip = index.data(Qt.DisplayRole)
+            tip = index.data(Qt.ItemDataRole.DisplayRole)
         if not isinstance(tip, str) or not tip.strip():
             return False
         QToolTip.showText(event.globalPos(), tip, self)
@@ -60,7 +60,7 @@ class ElidedToolTipMixin:
 
     def _elide_is_truncated(self, index) -> bool:
         """该单元格文字是否放不下（即绘制时会被省略号截断）。"""
-        text = index.data(Qt.DisplayRole)
+        text = index.data(Qt.ItemDataRole.DisplayRole)
         if not isinstance(text, str) or not text.strip():
             return False
         rect = self.visualRect(index)
@@ -77,7 +77,7 @@ class ElidedToolTipMixin:
         try:
             self.initViewItemOption(opt)
         except Exception:
-            # PyQt5 未暴露 initViewItemOption（Qt 5.5+ 的 protected 接口），
+            # PyQt6 未暴露 initViewItemOption（Qt 的 protected 接口），
             # 退而把 styleObject 指向自身，让 sizeHint 用本控件的 style 计算，
             # 而不是回退到 QApplication.style()
             try:

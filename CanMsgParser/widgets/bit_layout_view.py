@@ -9,14 +9,14 @@
 - Intel / Motorola 字节序正确渲染
 - 专业深色主题样式
 """
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QTreeWidget,
     QTreeWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsRectItem,
     QGraphicsTextItem, QLabel, QListWidget, QListWidgetItem,
     QHeaderView,
 )
-from PyQt5.QtCore import Qt, QRectF, QSize
-from PyQt5.QtGui import QColor, QBrush, QPen, QFont, QPainter
+from PyQt6.QtCore import Qt, QRectF, QSize
+from PyQt6.QtGui import QColor, QBrush, QPen, QFont, QPainter
 from core.can_data import MessageDef, SignalDef
 from utils.bit_utils import get_bit_positions
 from utils.font_helper import UI_FONT_FAMILY, ui_font
@@ -196,12 +196,12 @@ class BitLayoutView(QWidget):
         # 位图网格
         self._scene = QGraphicsScene()
         self._graphics_view = QGraphicsView(self._scene)
-        self._graphics_view.setRenderHint(QPainter.Antialiasing)
-        self._graphics_view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self._graphics_view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self._graphics_view.setBackgroundBrush(QBrush(QColor("#1e1e2e")))
         # 启用滚动条以支持大尺寸网格
-        self._graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         right_layout.addWidget(self._graphics_view, stretch=3)
 
         # 信号信息列表
@@ -218,8 +218,8 @@ class BitLayoutView(QWidget):
 
         # 列宽调整：信号名列设最小宽度，其余自动适配内容
         header = self._sig_list.header()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Interactive)  # 信号名列手动调整
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)  # 信号名列手动调整
         self._sig_list.setColumnWidth(0, dp(190))
         header.setStretchLastSection(True)
 
@@ -284,12 +284,12 @@ class BitLayoutView(QWidget):
             if matched_sigs:
                 display = f"0x{msg.frame_id:03X} — {msg.name}  ({len(matched_sigs)} 信号)"
                 item = QListWidgetItem(display)
-                item.setData(Qt.UserRole, msg)
+                item.setData(Qt.ItemDataRole.UserRole, msg)
                 self._candidate_list.addItem(item)
 
     def _on_candidate_selected(self, item: QListWidgetItem):
         """选中候选后渲染位图"""
-        msg = item.data(Qt.UserRole)
+        msg = item.data(Qt.ItemDataRole.UserRole)
         if msg:
             self._render_layout(msg)
 
@@ -303,7 +303,7 @@ class BitLayoutView(QWidget):
         # 半透明黑色背景矩形
         bg = QGraphicsRectItem(x, y, badge_w, badge_h)
         bg.setBrush(QBrush(QColor(0, 0, 0, 180)))  # 半透明黑色
-        bg.setPen(QPen(Qt.NoPen))
+        bg.setPen(QPen(Qt.PenStyle.NoPen))
         self._scene.addItem(bg)
         # 白色文字
         label = self._scene.addText(text)
@@ -496,7 +496,7 @@ class BitLayoutView(QWidget):
                 if len(excel_desc) > 5:
                     desc_text += "..."
             item.setText(9, desc_text)
-            item.setData(0, Qt.UserRole, sig.name)
+            item.setData(0, Qt.ItemDataRole.UserRole, sig.name)
 
         # 填充数据后自动调整所有列宽
         for i in range(self._sig_list.columnCount()):
@@ -508,7 +508,7 @@ class BitLayoutView(QWidget):
 
     def _on_sig_highlight(self, item: QTreeWidgetItem, column: int):
         """点击信号列表项，高亮对应色块"""
-        sig_name = item.data(0, Qt.UserRole)
+        sig_name = item.data(0, Qt.ItemDataRole.UserRole)
         if not sig_name:
             return
 

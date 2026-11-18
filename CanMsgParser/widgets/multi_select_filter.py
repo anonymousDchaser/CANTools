@@ -15,10 +15,10 @@
 - 菜单顶部内嵌搜索框：ID 很多时输入片段（1A0 / 0x1A0）即时过滤列表，只隐藏不重建，
   勾选状态不受影响；命中唯一项时按回车可直接切换其勾选，便于键盘快速操作。
 """
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
     QToolButton, QMenu, QListWidget, QListWidgetItem, QWidgetAction,
-    QLabel, QLineEdit,
+    QLabel, QLineEdit, QAbstractItemView,
 )
 
 from utils.font_helper import UI_FONT_FAMILY
@@ -42,11 +42,11 @@ class _SearchEdit(QLineEdit):
     submitted = pyqtSignal()
 
     def keyPressEvent(self, e):
-        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.submitted.emit()
             e.accept()
             return
-        if e.key() == Qt.Key_Escape:
+        if e.key() == Qt.Key.Key_Escape:
             e.ignore()
             return
         super().keyPressEvent(e)
@@ -73,7 +73,7 @@ class _CheckListWidget(QListWidget):
         self._owner = owner
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             self._owner._remember_press(self.itemAt(e.pos()))
         super().mousePressEvent(e)
 
@@ -141,8 +141,8 @@ class MultiSelectIdFilter(QToolButton):
         self._press_state = None     # 本次按下**之前**的勾选状态
         self._press_item = None      # 本次按下命中的列表项
 
-        self.setPopupMode(QToolButton.InstantPopup)
-        self.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.setStyleSheet(self._QSS)
 
         self._menu = QMenu(self)
@@ -157,7 +157,7 @@ class MultiSelectIdFilter(QToolButton):
 
         # ── 可勾选列表 ──
         self._list = _CheckListWidget(self, self._menu)
-        self._list.setSelectionMode(QListWidget.NoSelection)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._list.setMinimumWidth(dp(150))
         self._list.setMaximumHeight(dp(320))
         action = QWidgetAction(self._menu)
@@ -167,7 +167,7 @@ class MultiSelectIdFilter(QToolButton):
         # ── 无匹配提示（只在搜索无结果时出现）──
         self._empty_label = QLabel("无匹配的报文 ID", self._menu)
         self._empty_label.setObjectName("filterEmptyHint")
-        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_action = QWidgetAction(self._menu)
         self._empty_action.setDefaultWidget(self._empty_label)
         self._empty_action.setVisible(False)
@@ -230,7 +230,7 @@ class MultiSelectIdFilter(QToolButton):
 
     def _all_is_checked(self) -> bool:
         item = self._list.item(0)
-        return item is not None and item.checkState() == Qt.Checked
+        return item is not None and item.checkState() == Qt.CheckState.Checked
 
     def _refill(self) -> None:
         """按 _ids / _checked 重建列表项。"""
@@ -238,12 +238,12 @@ class MultiSelectIdFilter(QToolButton):
         try:
             self._list.clear()
             all_item = self._new_item(_ALL_TEXT, None)
-            all_item.setCheckState(Qt.Checked if not self._checked else Qt.Unchecked)
+            all_item.setCheckState(Qt.CheckState.Checked if not self._checked else Qt.CheckState.Unchecked)
             self._list.addItem(all_item)
             for aid in self._ids:
                 item = self._new_item(f"0x{aid:03X}", aid)
                 item.setCheckState(
-                    Qt.Checked if aid in self._checked else Qt.Unchecked
+                    Qt.CheckState.Checked if aid in self._checked else Qt.CheckState.Unchecked
                 )
                 self._list.addItem(item)
         finally:
@@ -255,8 +255,8 @@ class MultiSelectIdFilter(QToolButton):
     @staticmethod
     def _new_item(text, data):
         item = QListWidgetItem(text)
-        item.setData(Qt.UserRole, data)
-        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        item.setData(Qt.ItemDataRole.UserRole, data)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
         return item
 
     def _sync_check_states(self) -> None:
@@ -265,14 +265,14 @@ class MultiSelectIdFilter(QToolButton):
         try:
             for i in range(self._list.count()):
                 item = self._list.item(i)
-                aid = item.data(Qt.UserRole)
+                aid = item.data(Qt.ItemDataRole.UserRole)
                 if aid is None:
                     item.setCheckState(
-                        Qt.Checked if not self._checked else Qt.Unchecked
+                        Qt.CheckState.Checked if not self._checked else Qt.CheckState.Unchecked
                     )
                 else:
                     item.setCheckState(
-                        Qt.Checked if aid in self._checked else Qt.Unchecked
+                        Qt.CheckState.Checked if aid in self._checked else Qt.CheckState.Unchecked
                     )
         finally:
             self._updating = False
@@ -303,7 +303,7 @@ class MultiSelectIdFilter(QToolButton):
         out = []
         for i in range(self._list.count()):
             item = self._list.item(i)
-            if item.data(Qt.UserRole) is not None and not item.isHidden():
+            if item.data(Qt.ItemDataRole.UserRole) is not None and not item.isHidden():
                 out.append(item)
         return out
 
@@ -313,7 +313,7 @@ class MultiSelectIdFilter(QToolButton):
         matched = 0
         for i in range(self._list.count()):
             item = self._list.item(i)
-            aid = item.data(Qt.UserRole)
+            aid = item.data(Qt.ItemDataRole.UserRole)
             if aid is None:
                 # 「全部」快捷项：搜索时让位给具体 ID（清空搜索即恢复显示）
                 item.setHidden(bool(query))
@@ -331,7 +331,7 @@ class MultiSelectIdFilter(QToolButton):
             return
         item = visible[0]
         item.setCheckState(
-            Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+            Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked
         )
 
     # ────────────────────── 事件回调 ──────────────────────
@@ -364,14 +364,14 @@ class MultiSelectIdFilter(QToolButton):
         if item.checkState() != self._press_state:
             return
         item.setCheckState(
-            Qt.Unchecked if self._press_state == Qt.Checked else Qt.Checked
+            Qt.CheckState.Unchecked if self._press_state == Qt.CheckState.Checked else Qt.CheckState.Checked
         )
 
     def _on_item_changed(self, item) -> None:
         if self._updating:
             return
-        aid = item.data(Qt.UserRole)
-        checked = item.checkState() == Qt.Checked
+        aid = item.data(Qt.ItemDataRole.UserRole)
+        checked = item.checkState() == Qt.CheckState.Checked
         if aid is None:
             # 「全部」：勾选 = 清空其它勾选；取消勾选而其它项也没勾选 → 恢复
             if checked:

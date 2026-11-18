@@ -9,7 +9,7 @@ import tempfile
 
 import numpy as np
 import pandas as pd
-from PyQt5.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication
 
 from workers.load_worker import DecodeWorker
 from core.signal_cache import SignalCache

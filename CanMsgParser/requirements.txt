@@ -1,4 +1,4 @@
-PyQt5>=5.15
+PyQt6>=6.5       # Qt6 绑定（PyQt6 6.12 起提供 cp314 wheel）
 matplotlib>=3.5
 cantools>=37.0
 python-can>=4.0

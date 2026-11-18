@@ -19,8 +19,8 @@ if _PROJECT_ROOT not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
-from PyQt5.QtCore import Qt  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtCore import Qt  # noqa: E402
 
 _APP = QApplication.instance() or QApplication(sys.argv)
 
@@ -114,7 +114,7 @@ def _check_replace_dispatch(dbc_path, msgs):
 
     # 默认不勾选：只分发已勾选信号（此处勾上 SigA）
     assert p._replace_chk.isChecked() is False, "「替换」复选框应默认不勾选"
-    p._sig_list.topLevelItem(0).setCheckState(0, Qt.Checked)
+    p._sig_list.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
     p._on_group_dispatch("curve")
     assert got[-1][0] == "append" and got[-1][2] == [("Msg3E3", "SigA")], \
         f"未勾选「替换」时应只分发已勾选信号, got={got[-1]}"
@@ -215,7 +215,7 @@ def _check_raw_frame(dbc_path, msgs):
     print("    OK: 长度识别/自动补零/长度同步/非法拦截/原样发送均正确")
 
     # 3.7b 128 字节档位：可编辑，但发送被明确拦下（CAN FD 上限 64）
-    from PyQt5.QtWidgets import QMessageBox
+    from PyQt6.QtWidgets import QMessageBox
     combo = grp["dlc_combo"]
     assert combo.findData(128) >= 0, "长度下拉应含 128 字节档位"
     combo.setCurrentIndex(combo.findData(128))

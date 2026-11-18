@@ -13,8 +13,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 from widgets.message_table import MessageTableWidget
 from core.dbc_parser import parse_dbc
 
@@ -44,7 +44,7 @@ def _child_texts(model, frame_idx):
     idx = model.index(frame_idx, 0)
     model.fetchMore(idx)
     n = model.rowCount(idx)
-    return [model.data(model.index(i, 1, idx), Qt.DisplayRole) for i in range(n)]
+    return [model.data(model.index(i, 1, idx), Qt.ItemDataRole.DisplayRole) for i in range(n)]
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ class TestPathBLogFirstThenDbc:
         idx = message_table._model.index(0, 0)
         message_table._model.fetchMore(idx)
         assert message_table._model.rowCount(idx) == 1, "应有一个错误提示子项"
-        err = message_table._model.data(message_table._model.index(0, 1, idx), Qt.DisplayRole)
+        err = message_table._model.data(message_table._model.index(0, 1, idx), Qt.ItemDataRole.DisplayRole)
         assert "未加载 DBC" in err, "应提示未加载 DBC"
 
         # 加载 DBC 后重新展开 -> 成功解码
@@ -110,7 +110,7 @@ class TestPathBLogFirstThenDbc:
 
         idx2 = message_table._model.index(0, 0)
         message_table._model.fetchMore(idx2)
-        texts = [message_table._model.data(message_table._model.index(i, 1, idx2), Qt.DisplayRole)
+        texts = [message_table._model.data(message_table._model.index(i, 1, idx2), Qt.ItemDataRole.DisplayRole)
                  for i in range(message_table._model.rowCount(idx2))]
         assert "EngineRPM" in texts, f"应包含 EngineRPM 信号，实际: {texts}"
         assert not any("点击展开" in t for t in texts), "不应再有占位符"

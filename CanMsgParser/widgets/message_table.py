@@ -15,13 +15,13 @@ internalPointer），避免 C++ 侧持有已回收的 Python 对象导致段错�
 """
 import numpy as np
 import pandas as pd
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeView,
     QLineEdit, QPushButton, QComboBox, QLabel, QHeaderView,
     QStyledItemDelegate, QStyle,
 )
-from PyQt5.QtCore import Qt, QAbstractItemModel, QModelIndex, QSize, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt6.QtCore import Qt, QAbstractItemModel, QModelIndex, QSize, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
 import cantools
 from core.can_utils import load_dbc_database
 from core.can_data import MessageDef
@@ -178,14 +178,14 @@ class MessageTableModel(QAbstractItemModel):
         return False
 
     def headerData(self, section, orientation, role):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             return self._HEADERS[section]
         return None
 
     def flags(self, index):
         if not index.isValid():
-            return Qt.NoItemFlags
-        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     # ───────── 懒加载解码子项 ─────────
     def canFetchMore(self, parent):
@@ -234,7 +234,7 @@ class MessageTableModel(QAbstractItemModel):
         return int(row["frame_id"]), int(row["dlc"])
 
     # ───────── 数据显示 ─────────
-    def data(self, index, role=Qt.DisplayRole):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
         node = self._node(index)
@@ -242,7 +242,7 @@ class MessageTableModel(QAbstractItemModel):
             return None
         col = index.column()
         if node[0] == "frame":
-            if role != Qt.DisplayRole:
+            if role != Qt.ItemDataRole.DisplayRole:
                 return None
             r = node[1]
             row = self._frame_index.iloc[r]
@@ -262,7 +262,7 @@ class MessageTableModel(QAbstractItemModel):
                 return " ".join(f"{b:02X}" for b in self._raw_data[fid, :dlc])
             return None
         else:
-            if role != Qt.DisplayRole:
+            if role != Qt.ItemDataRole.DisplayRole:
                 return None
             r, s = node[1], node[2]
             return self._child_text(r, s, col)
@@ -412,7 +412,7 @@ class HexDataDelegate(QStyledItemDelegate):
         change_row = bc[r]
         frame_data = raw[fid, :dlc]
 
-        if option.state & QStyle.State_Selected:
+        if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
         else:
             painter.fillRect(option.rect, self.BG_COLOR)

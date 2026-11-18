@@ -5,13 +5,14 @@ import os
 import sys
 import ctypes
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QTabWidget, QMenuBar, QMenu, QAction, QFileDialog, QDockWidget,
+    QTabWidget, QMenuBar, QMenu, QFileDialog, QDockWidget,
     QStatusBar, QProgressBar, QMessageBox, QLabel, QApplication,
     QPushButton, QListWidgetItem, QAbstractItemView,
 )
-from PyQt5.QtCore import Qt, QEvent, QTimer
+from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, QEvent, QTimer
 import pandas as pd
 import numpy as np
 from core.dbc_parser import parse_dbc
@@ -571,7 +572,7 @@ class MainWindow(QMainWindow):
         chart_layout = QHBoxLayout(chart_tab)
         chart_layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
 
-        chart_splitter = QSplitter(Qt.Horizontal)
+        chart_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # 左侧列：已选信号显示区（由「信号分组」窗分发添加，可删除）
         left_col = QWidget()
@@ -590,7 +591,7 @@ class MainWindow(QMainWindow):
 
         # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧曲线图绘制顺序）
         self._selected_list = DragReorderListWidget()
-        self._selected_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._selected_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._selected_list.setAlternatingRowColors(True)
         self._selected_list.setToolTip(
             "点击行首眼睛图标可显示/隐藏对应曲线（数据保留，不重新解码）；\n"
@@ -711,11 +712,11 @@ class MainWindow(QMainWindow):
         self._group_dock = QDockWidget("信号分组", self)
         self._group_dock.setWidget(self._group_panel)
         self._group_dock.setFeatures(
-            QDockWidget.DockWidgetFloatable
-            | QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetClosable
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
-        self._group_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self._group_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
 
         # ── 信号检索视图（独立停靠窗，与信号分组联动）──
         self._search_panel = SignalTreeWidget()
@@ -724,11 +725,11 @@ class MainWindow(QMainWindow):
         self._search_dock = QDockWidget("信号检索", self)
         self._search_dock.setWidget(self._search_panel)
         self._search_dock.setFeatures(
-            QDockWidget.DockWidgetFloatable
-            | QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetClosable
+            QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
-        self._search_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self._search_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
 
         # 初始纵向堆叠停靠在左侧（构造期保持停靠，依附主窗口，避免闪现）。
         # 顺序固定为「信号检索在上、信号分组在下」，与浮动后的顺序保持一致。
@@ -1002,7 +1003,7 @@ class MainWindow(QMainWindow):
         self._selected_list.clear()
         for msg_name, sig_name in self._curve_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.UserRole, (msg_name, sig_name))
+            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
             item.setData(EYE_ROLE, (msg_name, sig_name) not in self._curve_hidden)
             self._selected_list.addItem(item)
         self._selected_list.blockSignals(False)
@@ -1016,7 +1017,7 @@ class MainWindow(QMainWindow):
         item = self._selected_list.item(row)
         if item is None:
             return
-        key = item.data(Qt.UserRole)
+        key = item.data(Qt.ItemDataRole.UserRole)
         if key is None:
             return
         key = tuple(key)
@@ -1038,7 +1039,7 @@ class MainWindow(QMainWindow):
     def _remove_selected_signals(self):
         """从已选列表中移除选中项（顺带清理其隐藏状态）"""
         for item in self._selected_list.selectedItems():
-            key = item.data(Qt.UserRole)
+            key = item.data(Qt.ItemDataRole.UserRole)
             if key is None:
                 continue
             self._curve_signals.remove(key)
@@ -1105,7 +1106,7 @@ class MainWindow(QMainWindow):
         """
         order = []
         for i in range(self._selected_list.count()):
-            data = self._selected_list.item(i).data(Qt.UserRole)
+            data = self._selected_list.item(i).data(Qt.ItemDataRole.UserRole)
             if data is not None:
                 order.append(tuple(data))
         self._curve_signals = order
@@ -1162,17 +1163,17 @@ class MainWindow(QMainWindow):
         """
         self._search_dock.setFloating(False)
         self._group_dock.setFloating(False)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._search_dock)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self._group_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._search_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._group_dock)
         # splitDockWidget(first, second, Vertical) => first 在上、second 在下
-        self.splitDockWidget(self._search_dock, self._group_dock, Qt.Vertical)
+        self.splitDockWidget(self._search_dock, self._group_dock, Qt.Orientation.Vertical)
         try:
             self.resizeDocks(
-                [self._search_dock, self._group_dock], [1, 1], Qt.Vertical
+                [self._search_dock, self._group_dock], [1, 1], Qt.Orientation.Vertical
             )
             col_w = self._docked_column_width()
             self.resizeDocks(
-                [self._search_dock, self._group_dock], [col_w, col_w], Qt.Horizontal
+                [self._search_dock, self._group_dock], [col_w, col_w], Qt.Orientation.Horizontal
             )
         except (AttributeError, TypeError):  # Qt < 5.6 兜底
             pass
@@ -1389,7 +1390,7 @@ class MainWindow(QMainWindow):
         </ul>
         <p><b>Python 依赖包:</b></p>
         <ul>
-            <li>PyQt5 — GUI 框架</li>
+            <li>PyQt6 — GUI 框架</li>
             <li>matplotlib — 图表绘制</li>
             <li>cantools — DBC 解析</li>
             <li>python-can — CAN 日志读取</li>

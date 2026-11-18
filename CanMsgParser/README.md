@@ -1,9 +1,20 @@
-# CAN 报文分析工具 (CanMsgParser) v1.4.0
+# CAN 报文分析工具 (CanMsgParser) v1.5.0
 
-基于 PyQt5 的 CAN 报文分析桌面工具，支持 DBC 解析、信号检索与分组、曲线绘制、
+基于 PyQt6 的 CAN 报文分析桌面工具，支持 DBC 解析、信号检索与分组、曲线绘制、
 实时监控、信号模拟上报、报文回放与录制（BLF / ASC）等功能。
 
 ## 版本说明
+
+- **v1.5.0**：迁移到 Qt6（PyQt6）。
+  **原因**：Qt 5.15 在 macOS 新版上已无官方支持，实测 macOS 上渲染彩色 emoji 会让
+  Qt5 陷入死循环（主窗口构造停在 `QDockWidget.setWidget`，界面永久无响应）；Qt5 也
+  没有 Python 3.13+ 的 wheel。
+  **改动**：全工程 PyQt5 → PyQt6——枚举全限定（`Qt.AlignLeft` →
+  `Qt.AlignmentFlag.AlignLeft`，继承来的枚举回退到定义它的基类）、`QAction` 归入
+  `QtGui`、`exec_()` → `exec()`、matplotlib 后端 `Qt5Agg` → `QtAgg`、移除 Qt6 已删除的
+  `AA_EnableHighDpiScaling` / `AA_UseHighDpiPixmaps`；界面文案去掉彩色 emoji。
+  功能与 v1.4.0 一致，交互行为不变。迁移脚本见 `tools/qt5toqt6.py`（按 MRO 继承链
+  生成枚举映射，可重复执行）。
 
 - **v1.4.0**：拖放识别与 macOS 分发。
   **拖放**：把 `.blf` / `.asc` 日志拖入应用，会**同时**成为「待分析报文」（分析页）
@@ -211,7 +222,7 @@ ASC 文件会正常补写结束标记（`End TriggerBlock`），可直接用 CAN
 ## 依赖
 
 ```
-PyQt5 matplotlib cantools python-can pandas numpy openpyxl xlrd lxml uptime
+PyQt6 matplotlib cantools python-can pandas numpy openpyxl xlrd lxml uptime
 ```
 
 `uptime` 仅 Windows 的 PEAK(PCAN) 后端需要：macOS / Linux 上 PCAN 驱动本身不可用，
@@ -219,8 +230,8 @@ PyQt5 matplotlib cantools python-can pandas numpy openpyxl xlrd lxml uptime
 
 - 完整清单见 `requirements.txt`（其中 `pytest` 仅用于开发自测、`pyinstaller`
   仅用于打包，**运行时不需要**）。
-- **Python 版本**：推荐 **3.11 / 3.12**。PyQt5 5.15.11（当前最新版）官方支持到
-  Python 3.12，更高版本虽可能装上但属未验证组合，不建议用于打包。
+- **Python 版本**：推荐 **3.11 / 3.12**。PyQt6 6.12 提供 3.9–3.13 的官方 wheel，
+  Python 3.14 需 PyQt6 ≥ 6.12（本项目 Windows 打包即在此组合上验证）。
 
 ## 运行
 
@@ -304,9 +315,9 @@ uname -m            # arm64 = Apple Silicon；x86_64 = Intel
 python3 --version
 ```
 
-- 推荐 **Python 3.11 或 3.12**（PyQt5 5.15.11 官方支持到 3.12）。
+- 推荐 **Python 3.11 或 3.12**（PyQt6 提供 3.9–3.13 官方 wheel，CI 固定 3.12）。
 - Apple Silicon 请务必使用**原生 arm64** Python。若 `uname -m` 输出 `arm64`
-  而 Python 是 x86_64（Rosetta），PyQt5 与打包产物都会以转译模式运行，性能差
+  而 Python 是 x86_64（Rosetta），PyQt6 与打包产物都会以转译模式运行，性能差
   且产物只能在该模式下启动。
 
 用 pyenv 安装（推荐，便于锁定版本）：
@@ -339,8 +350,8 @@ pip install -r requirements.txt
   pip install -r requirements.txt
   ```
 
-- `PyQt5` 装不上，绝大多数情况是 Python 版本过高。请确认 Python ≤ 3.12
-  （PyQt5 5.15.11 的官方支持上限）。
+- `PyQt6` 装不上时先核对 Python 与 wheel 的匹配：PyQt6 6.12 覆盖 3.9–3.13，
+  Python 3.14 需 PyQt6 ≥ 6.12（本机已验证）。
 
 ### 3. 以源码方式运行
 

@@ -3,7 +3,7 @@
 用于「已选信号列表 / 分组信号列表」等控件：用户选中条目后直接按 Delete 键
 移除，等价于点击「移除选中」按钮。
 """
-from PyQt5.QtCore import QObject, QEvent, Qt
+from PyQt6.QtCore import QObject, QEvent, Qt
 
 
 class DelKeyFilter(QObject):
@@ -20,7 +20,7 @@ class DelKeyFilter(QObject):
         target.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Delete:
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Delete:
             self._on_delete()
             return True
         return super().eventFilter(obj, event)

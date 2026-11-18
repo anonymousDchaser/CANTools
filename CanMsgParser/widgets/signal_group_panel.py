@@ -11,14 +11,14 @@
 """
 import json
 from dataclasses import dataclass, field
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton,
     QInputDialog, QMessageBox,
     QFileDialog, QLabel, QAbstractItemView, QTreeWidgetItem,
     QLineEdit, QCheckBox, QHeaderView,
 )
-from PyQt5.QtCore import pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QColor, QFont
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont
 from core.can_data import MessageDef
 from widgets.theme import DARK_PANEL_QSS
 from widgets.del_key_filter import DelKeyFilter
@@ -151,19 +151,19 @@ class SignalGroupPanel(QWidget):
         self._sig_list = DragReorderTreeWidget()
         self._sig_list.setColumnCount(2)
         self._sig_list.setHeaderLabels(["信号", "备注（描述功能）"])
-        self._sig_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._sig_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._sig_list.setAlternatingRowColors(True)
         # 信号列用 Interactive（列宽由 _autosize_signal_column 按内容自适应，
         # 之后仍可手动拖动），备注列吃掉剩余宽度：既不再用两个固定列宽
         # （原 300 + 220）把面板最小宽度顶到 700px 以上，也不会因固定列宽
         # 截断较长的信号名。
         _header = self._sig_list.header()
-        _header.setSectionResizeMode(0, QHeaderView.Interactive)
-        _header.setSectionResizeMode(1, QHeaderView.Stretch)
+        _header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        _header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._sig_list.setColumnWidth(0, dp(150))   # 兜底初值，随列表刷新重算
         # 与「信号检索」树一致：跨分组搜索的子项缩进收紧，少占名称列宽度
         self._sig_list.setIndentation(dp(14))
-        self._sig_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._sig_list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._sig_list.itemChanged.connect(self._on_sig_checked)
         self._sig_list.orderChanged.connect(self._on_sig_order_changed)
         layout.addWidget(self._sig_list, stretch=1)
@@ -274,15 +274,15 @@ class SignalGroupPanel(QWidget):
         result = []
         for i in range(self._sig_list.topLevelItemCount()):
             top = self._sig_list.topLevelItem(i)
-            sig_ref = top.data(0, Qt.UserRole)
-            if sig_ref is not None and (top.flags() & Qt.ItemIsUserCheckable) \
-                    and top.checkState(0) == Qt.Checked:
+            sig_ref = top.data(0, Qt.ItemDataRole.UserRole)
+            if sig_ref is not None and (top.flags() & Qt.ItemFlag.ItemIsUserCheckable) \
+                    and top.checkState(0) == Qt.CheckState.Checked:
                 result.append((sig_ref.msg_name, sig_ref.sig_name))
             for j in range(top.childCount()):
                 child = top.child(j)
-                cs = child.data(0, Qt.UserRole)
-                if cs is not None and (child.flags() & Qt.ItemIsUserCheckable) \
-                        and child.checkState(0) == Qt.Checked:
+                cs = child.data(0, Qt.ItemDataRole.UserRole)
+                if cs is not None and (child.flags() & Qt.ItemFlag.ItemIsUserCheckable) \
+                        and child.checkState(0) == Qt.CheckState.Checked:
                     result.append((cs.msg_name, cs.sig_name))
         return result
 
@@ -346,9 +346,9 @@ class SignalGroupPanel(QWidget):
         name = self._groups[self._current_group_idx].name
         reply = QMessageBox.question(
             self, "确认删除", f"确定删除分组 '{name}' 吗？",
-            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             self._groups.pop(self._current_group_idx)
             self._dirty = True
             self._refresh_combo()
@@ -406,7 +406,7 @@ class SignalGroupPanel(QWidget):
                 header = QTreeWidgetItem(self._sig_list)
                 header.setText(0, f"{g.name}  ({len(matches)} 信号)")
                 header.setFlags(
-                    header.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsUserCheckable
+                    header.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsUserCheckable
                 )
                 header.setForeground(0, QColor("#9090a0"))
                 hf = header.font(0)
@@ -496,19 +496,19 @@ class SignalGroupPanel(QWidget):
         item = QTreeWidgetItem(parent) if parent is not None \
             else QTreeWidgetItem(self._sig_list)
         item.setText(0, f"{sig_ref.sig_name}  ({sig_ref.msg_name} · {sig_ref.frame_id})")
-        item.setData(0, Qt.UserRole, sig_ref)
+        item.setData(0, Qt.ItemDataRole.UserRole, sig_ref)
 
         matched = (sig_ref.msg_name, sig_ref.sig_name) in self._dbc_lookup
         if matched:
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            item.setCheckState(0, Qt.Unchecked)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
             # 信号列宽有限，超长文本尾部会被截断；悬停可看完整「信号名 + 报文 · 帧ID」
             item.setToolTip(0, "%s\n所属报文: %s  ·  %s" % (
                 sig_ref.sig_name, sig_ref.msg_name, sig_ref.frame_id))
         else:
             # 置灰不可勾选
             item.setFlags(
-                item.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsEnabled
+                item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable & ~Qt.ItemFlag.ItemIsEnabled
             )
             item.setToolTip(0, "当前 DBC 中未找到此信号")
             item.setForeground(0, QColor("#555560"))
@@ -545,7 +545,7 @@ class SignalGroupPanel(QWidget):
         if not 0 <= row < self._sig_list.topLevelItemCount():
             return
         item = self._sig_list.topLevelItem(row)
-        sig_ref = item.data(0, Qt.UserRole)
+        sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
         if sig_ref is not None:
             self._attach_remark_editor(item, sig_ref)
 
@@ -567,7 +567,7 @@ class SignalGroupPanel(QWidget):
         g = self._groups[self._current_group_idx]
         new_order = []
         for i in range(self._sig_list.topLevelItemCount()):
-            sig_ref = self._sig_list.topLevelItem(i).data(0, Qt.UserRole)
+            sig_ref = self._sig_list.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
             if sig_ref is not None:
                 new_order.append(sig_ref)
         if len(new_order) == len(g.signals) and new_order != g.signals:
@@ -587,7 +587,7 @@ class SignalGroupPanel(QWidget):
 
     def _on_remark_edited(self, item, line_edit):
         """备注编辑完成——写回 SignalRef 并标记脏（触发自动保存）。"""
-        sig_ref = item.data(0, Qt.UserRole)
+        sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
         if sig_ref is not None:
             sig_ref.remark = line_edit.text().strip()
             self._dirty = True
@@ -600,7 +600,7 @@ class SignalGroupPanel(QWidget):
 
         changed = False
         for item in selected:
-            sig_ref = item.data(0, Qt.UserRole)
+            sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
             if sig_ref is None:
                 continue
             for g in self._groups:
@@ -632,14 +632,14 @@ class SignalGroupPanel(QWidget):
         for i in range(self._sig_list.topLevelItemCount()):
             top = self._sig_list.topLevelItem(i)
             candidates = []
-            if top.flags() & Qt.ItemIsUserCheckable:
+            if top.flags() & Qt.ItemFlag.ItemIsUserCheckable:
                 candidates.append(top)
             for j in range(top.childCount()):
                 candidates.append(top.child(j))
             for it in candidates:
-                if (it.flags() & Qt.ItemIsUserCheckable) and not it.isHidden():
+                if (it.flags() & Qt.ItemFlag.ItemIsUserCheckable) and not it.isHidden():
                     total += 1
-                    if it.checkState(0) == Qt.Checked:
+                    if it.checkState(0) == Qt.CheckState.Checked:
                         checked += 1
         self._check_all_chk.blockSignals(True)
         self._check_all_chk.setChecked(total > 0 and checked == total)
@@ -652,8 +652,8 @@ class SignalGroupPanel(QWidget):
             top = self._sig_list.topLevelItem(i)
             items = [top] + [top.child(k) for k in range(top.childCount())]
             for it in items:
-                if (it.flags() & Qt.ItemIsUserCheckable) and not it.isHidden():
-                    it.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+                if (it.flags() & Qt.ItemFlag.ItemIsUserCheckable) and not it.isHidden():
+                    it.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         self._sig_list.blockSignals(False)
         self._on_sig_checked(None, 0)
 

@@ -20,7 +20,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.byte_change import compute_byte_change_array, NO_CHANGE
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 from widgets.message_table import HexDataDelegate
 
 _app = None

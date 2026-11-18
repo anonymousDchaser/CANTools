@@ -5,9 +5,9 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtWidgets import QApplication, QListWidget
-from PyQt5.QtCore import Qt, QEvent
-from PyQt5.QtGui import QKeyEvent
+from PyQt6.QtWidgets import QApplication, QListWidget
+from PyQt6.QtCore import Qt, QEvent
+from PyQt6.QtGui import QKeyEvent
 
 from widgets.del_key_filter import DelKeyFilter
 from widgets.realtime_monitor_widget import RealtimeMonitorWidget
@@ -20,7 +20,7 @@ app = QApplication(sys.argv)
 def _send_del(widget):
     """向目标控件同步派发一次 Delete 键按下事件（会经事件过滤器拦截）。"""
     QApplication.sendEvent(
-        widget, QKeyEvent(QEvent.KeyPress, Qt.Key_Delete, Qt.NoModifier)
+        widget, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)
     )
 
 

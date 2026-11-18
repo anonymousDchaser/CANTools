@@ -88,13 +88,13 @@ def ui_font(size=13, bold=False, mono=False):
     :return: ``QFont`` 实例；若首选字体缺失，Qt 会按 styleHint 回落到同类字体，
              不会渲染成方框。
     """
-    from PyQt5.QtGui import QFont
+    from PyQt6.QtGui import QFont
 
     names = _mono_fonts() if mono else _cjk_fonts()
-    weight = QFont.Bold if bold else QFont.Normal
+    weight = QFont.Weight.Bold if bold else QFont.Weight.Normal
     font = QFont(names[0], size, weight)
     # 首选字体在当前系统不存在时交给 Qt 的回落机制
-    font.setStyleHint(QFont.Monospace if mono else QFont.SansSerif)
+    font.setStyleHint(QFont.StyleHint.Monospace if mono else QFont.StyleHint.SansSerif)
     return font
 
 

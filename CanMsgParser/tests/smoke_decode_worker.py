@@ -2,7 +2,7 @@
 直接调用 run()，验证向量化解码接线正确（输出长度 / 与逐帧 cantools 一致）。"""
 import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 import numpy as np
 import cantools
 from core.log_loader import load_log_file

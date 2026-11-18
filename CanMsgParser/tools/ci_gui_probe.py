@@ -1,116 +1,1 @@
-# -*- coding: utf-8 -*-
-"""CI è¯Šæ–­ï¼šå®šä½ macOS ä¸Š SignalGroupPanel æ˜¾ç¤ºæ—¶å¡æ­»çš„æœ€å°å¤çŽ°åœºæ™¯ã€‚
-
-ä¸ºä»€ä¹ˆå•ç‹¬å†™ä¸€ä¸ªè„šæœ¬ï¼š
-    å¡ä½çš„æ˜¯ Qt C++ å†…éƒ¨çš„å¸ƒå±€/ç»˜åˆ¶å¾ªçŽ¯ï¼ŒPython ä¾§ faulthandler æŠ“åˆ°çš„æ ˆæ°¸è¿œåœåœ¨
-    p.show() è¿™ä¸€è¡Œï¼Œå†å¾€é‡Œæ²¡æœ‰ Python å¸§å¯ç”¨ï¼Œæ‰€ä»¥é æ ˆåŒºåˆ†ä¸å‡ºè´£ä»»æ–¹ã€‚
-    è¿™é‡Œç»™æ¯ä¸ªæœ€å°åœºæ™¯èµ·ä¸€ä¸ªç‹¬ç«‹å­è¿›ç¨‹ï¼Œè°å¡ä½è°å°±æ˜¯è´£ä»»æ–¹ã€‚
-
-å·²æŽ’é™¤ï¼ˆ2026-11 ä¸¤è½®ç»“è®ºï¼‰ï¼š
-    - QDockWidget æ— å…³ï¼šé¢æ¿å•ç‹¬ show å°±å¡ï¼›
-    - æž„é€ ã€resize ä¸å¡ï¼Œå¡åœ¨ show()ï¼›
-    - ä¸æ˜¯åˆ—å®½è‡ªé€‚åº”ï¼ˆç¦ç”¨åŽä»å¡ï¼‰ã€ä¸æ˜¯ä¿¡å·æ ‘ï¼ˆhide åŽä»å¡ï¼‰ã€
-      ä¸æ˜¯ DARK_PANEL_QSSï¼ˆè£¸ QWidget å¥—åŒæ ·æ ·å¼æ­£å¸¸ï¼‰ã€‚
-
-ç”¨æ³•::
-
-    python tools/ci_gui_probe.py
-"""
-from __future__ import annotations
-
-import os
-import subprocess
-import sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-
-_PANEL = "from widgets.signal_group_panel import SignalGroupPanel\n"
-
-CASES = [
-    (
-        "A-dock-plain-show",
-        "å¯¹ç…§ï¼šQDockWidget + è£¸ QWidget + çª—å£ show()",
-        "win = QMainWindow(); d = QDockWidget('t', win)\n"
-        "d.setWidget(QWidget()); win.addDockWidget(Qt.LeftDockWidgetArea, d); win.show()\n"
-        "print('CASE OK', flush=True)",
-    ),
-    (
-        "B-panel-show",
-        "åŸºçº¿ï¼šæž„é€  + show()",
-        _PANEL + "p = SignalGroupPanel(); p.show()\n"
-        "print('CASE OK', flush=True)",
-    ),
-    (
-        "C-panel-hide-children-show",
-        "æž„é€  + éšè—å…¨éƒ¨ç›´æŽ¥å­æŽ§ä»¶ + show()",
-        _PANEL + "p = SignalGroupPanel()\n"
-        "for w in p.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):\n"
-        "    w.hide()\n"
-        "p.show()\n"
-        "print('CASE OK', flush=True)",
-    ),
-    (
-        "D-panel-stepwise-children",
-        "æž„é€  + å…ˆéšè—å…¨éƒ¨å­æŽ§ä»¶ + showï¼Œå†é€ä¸ªæ˜¾ç¤ºå¹¶æ‰“ç‚¹ï¼ˆå¡ä½æ—¶æœ€åŽä¸€è¡Œå°±æ˜¯è´£ä»»æŽ§ä»¶ï¼‰",
-        _PANEL + "from PyQt5.QtCore import QTimer\n"
-        "p = SignalGroupPanel()\n"
-        "kids = p.findChildren(QWidget, options=Qt.FindDirectChildrenOnly)\n"
-        "for w in kids:\n"
-        "    w.hide()\n"
-        "p.show()\n"
-        "print('panel shown, direct children =', len(kids), flush=True)\n"
-        "state = {'i': 0}\n"
-        "def step():\n"
-        "    i = state['i']\n"
-        "    if i >= len(kids):\n"
-        "        print('ALL CHILDREN SHOWN OK', flush=True)\n"
-        "        app.quit()\n"
-        "        return\n"
-        "    w = kids[i]\n"
-        "    print('showing', i, w.__class__.__name__, flush=True)\n"
-        "    w.show()\n"
-        "    state['i'] = i + 1\n"
-        "    QTimer.singleShot(300, step)\n"
-        "QTimer.singleShot(300, step)\n"
-        "app.exec_()\n"
-        "print('CASE OK', flush=True)",
-    ),
-]
-
-TEMPLATE = """import faulthandler, sys
-faulthandler.dump_traceback_later(20, exit=True)
-sys.path.insert(0, {root!r})
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QMainWindow, QDockWidget, QWidget
-app = QApplication([])
-{middle}
-"""
-
-
-def main() -> int:
-    failed = 0
-    for name, desc, middle in CASES:
-        code = TEMPLATE.format(root=ROOT, middle=middle)
-        try:
-            r = subprocess.run(
-                [sys.executable, "-u", "-c", code],
-                capture_output=True, text=True, timeout=45,
-            )
-            out = (r.stdout + r.stderr).strip()
-            ok = r.returncode == 0 and "CASE OK" in out
-        except subprocess.TimeoutExpired:
-            out, ok = "å­è¿›ç¨‹ 45s æœªç»“æŸï¼ˆfaulthandler éƒ½æ²¡æœºä¼šè¾“å‡ºï¼‰", False
-        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {desc}")
-        for line in out.splitlines():
-            if "Populating font family aliases" in line:
-                continue
-            print("    " + line)
-        if not ok:
-            failed += 1
-    print(f"\n{len(CASES) - failed}/{len(CASES)} ä¸ªåœºæ™¯é€šè¿‡")
-    return 1 if failed else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+)¶Ð†ÔÖß9]F.ñLzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½)¶Ð†ÔÖß9]F.ñLzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½Lzò„MÅ‘\•`Jg½

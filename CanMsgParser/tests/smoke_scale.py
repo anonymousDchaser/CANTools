@@ -3,7 +3,7 @@ import os, sys, time, tempfile, tracemalloc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 from core.log_loader import load_log_file
 from widgets.message_table import MessageTableWidget
 

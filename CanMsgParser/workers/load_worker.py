@@ -3,7 +3,7 @@
 import cantools
 from core.can_utils import load_dbc_database
 import numpy as np
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 from core.can_data import MessageDef, DecodedSignal
 from core.log_loader import load_log_file
 from core.signal_cache import SignalCache

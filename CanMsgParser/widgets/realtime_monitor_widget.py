@@ -8,11 +8,11 @@
 
 通道/波特率不再由本页设置，统一由「连接状态」页提供（set_connection）。
 """
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QPushButton,
     QLabel, QMessageBox, QAbstractItemView, QListWidgetItem,
 )
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 
 from widgets.plot_widget import PlotWidget
 from widgets.del_key_filter import DelKeyFilter
@@ -44,7 +44,7 @@ class RealtimeMonitorWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(dp(4), dp(4), dp(4), dp(4))
 
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # ─── 左侧：已选信号列表 ───
         left = QWidget()
@@ -55,7 +55,7 @@ class RealtimeMonitorWidget(QWidget):
         left_layout.addWidget(QLabel("已选信号（长按 ⋮⋮ 拖动排序）:"))
         # 支持长按行右侧把手拖拽调整顺序（顺序同步到右侧实时曲线绘制顺序）
         self._sel_list = DragReorderListWidget()
-        self._sel_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._sel_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._sel_list.setAlternatingRowColors(True)
         self._sel_list.setToolTip(
             "长按行右侧 ⋮⋮ 把手并拖动可调整信号顺序；\n"
@@ -156,13 +156,13 @@ class RealtimeMonitorWidget(QWidget):
         self._sel_list.clear()
         for msg_name, sig_name in self._sel_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.UserRole, (msg_name, sig_name))
+            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
             self._sel_list.addItem(item)
         self._sel_list.blockSignals(False)
 
     def _remove_selected(self):
         for item in self._sel_list.selectedItems():
-            data = item.data(Qt.UserRole)
+            data = item.data(Qt.ItemDataRole.UserRole)
             if data in self._sel_signals:
                 self._sel_signals.remove(data)
         self._refresh_sel_list()
@@ -179,7 +179,7 @@ class RealtimeMonitorWidget(QWidget):
         """已选信号列表拖拽排序回调：同步顺序，并按新顺序重排实时曲线。"""
         order = []
         for i in range(self._sel_list.count()):
-            data = self._sel_list.item(i).data(Qt.UserRole)
+            data = self._sel_list.item(i).data(Qt.ItemDataRole.UserRole)
             if data is not None:
                 order.append(tuple(data))
         self._sel_signals = order
@@ -245,9 +245,9 @@ class RealtimeMonitorWidget(QWidget):
         meta = [(self._frame_id_of(m), m, s) for (m, s) in self._sel_signals]
         self._plot.start_realtime(meta)
         self._capture_worker = CanCaptureWorker(self._dbc_path, checked)
-        self._capture_worker.sample_received.connect(self._on_sample, Qt.QueuedConnection)
-        self._capture_worker.status_changed.connect(self._on_status, Qt.QueuedConnection)
-        self._capture_worker.error_occurred.connect(self._on_error, Qt.QueuedConnection)
+        self._capture_worker.sample_received.connect(self._on_sample, Qt.ConnectionType.QueuedConnection)
+        self._capture_worker.status_changed.connect(self._on_status, Qt.ConnectionType.QueuedConnection)
+        self._capture_worker.error_occurred.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         if not self._capture_worker.start_monitoring():
             self._capture_worker = None
             return

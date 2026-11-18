@@ -18,9 +18,9 @@ DragReorderMixin 提供通用拖拽逻辑，QListWidget 与 QTreeWidget 各自�
 - DragReorderTreeWidget：QTreeWidget 子类，仅「携带 UserRole 数据」的顶层项
   可拖拽（信号分组面板中分组标题行 / 子项不参与）。
 """
-from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QPointF, pyqtSignal, QMimeData
-from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QDrag
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, QTimer, QRect, QPoint, QPointF, pyqtSignal, QMimeData
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QDrag
+from PyQt6.QtWidgets import (
     QApplication, QListWidget, QTreeWidget, QStyledItemDelegate, QStyle,
     QStyleOptionViewItem,
 )
@@ -33,7 +33,7 @@ _MIME_TYPE = "application/x-canmsgparser-drag-row"
 # 行首「眼睛」图标状态的自定义 item data 角色：
 # True = 睁开（显示曲线），False = 闭合（隐藏曲线）。
 # 读取一律用 `is not False` 判定，未设置过该角色的行按「显示」处理。
-EYE_ROLE = Qt.UserRole + 100
+EYE_ROLE = Qt.ItemDataRole.UserRole + 100
 
 # 行首眼睛图标区域宽度（像素）。与 HANDLE_WIDTH 一样取固定值，不参与分辨率缩放，
 # 以保持与已有把手/行高的视觉比例一致。
@@ -82,7 +82,7 @@ class _HandleDelegate(QStyledItemDelegate):
             # 长按激活行：叠加淡蓝色背景提示「可拖动」
             painter.fillRect(option.rect, QColor(79, 195, 247, 30))
 
-        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
         if is_eye_col:
             # 未设置 EYE_ROLE 的行按「显示」处理，避免历史行被画成闭眼
             visible = index.data(EYE_ROLE) is not False
@@ -105,19 +105,19 @@ class _HandleDelegate(QStyledItemDelegate):
         color = QColor("#c8c8d8") if visible else QColor("#5a5a6e")
         path = QPainterPath()
         painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         pen = QPen(color, 1.3)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         if visible:
             # 上下两段对称二次贝塞尔拼成杏仁形眼廓
             path.moveTo(cx - half_w, cy)
             path.quadTo(cx, cy - half_h * 1.9, cx + half_w, cy)
             path.quadTo(cx, cy + half_h * 1.9, cx - half_w, cy)
             painter.drawPath(path)
-            painter.setPen(Qt.NoPen)
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
             painter.drawEllipse(QPointF(cx, cy), half_w * 0.26, half_w * 0.26)
         else:
@@ -150,7 +150,7 @@ class _HandleDelegate(QStyledItemDelegate):
         cy = r.center().y()
         color = QColor("#4fc3f7") if row == armed_row else QColor("#6a6a7e")
         painter.save()
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         for dx in (-3, 3):
             for dy in (-6, 0, 6):
@@ -175,7 +175,7 @@ class DragReorderMixin:
         _dnd_handle_rect() -> QRect     把手命中区域（viewport 坐标）
         _dnd_row_allowed(row) -> bool   该行是否可参与拖拽
 
-    顺序变化后发出 orderChanged()（无参数），外部遍历各行 data(Qt.UserRole)
+    顺序变化后发出 orderChanged()（无参数），外部遍历各行 data(Qt.ItemDataRole.UserRole)
     即可得到新顺序。被移动行的新行号可通过 lastMovedRow() 查询——宿主若用
     setItemWidget 挂载了行内控件（如备注编辑框），只需重建该行即可，
     其余行的 item widget 不受 take/insert 影响。
@@ -292,7 +292,7 @@ class DragReorderMixin:
     # ────────────────────── 鼠标交互 ──────────────────────
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.MouseButton.LeftButton:
             # 眼睛图标优先：命中则只切换显隐，不进入选中/长按拖拽流程
             if self._toggle_eye_at(e.pos()):
                 e.accept()
@@ -315,7 +315,7 @@ class DragReorderMixin:
             # 长按等待期：无移动取消阈值，吞掉移动事件避免触发选择拖动
             e.accept()
             return
-        if self._drag_armed and (e.buttons() & Qt.LeftButton):
+        if self._drag_armed and (e.buttons() & Qt.MouseButton.LeftButton):
             self._start_drag()
             return
         super().mouseMoveEvent(e)
@@ -334,7 +334,7 @@ class DragReorderMixin:
 
     def keyPressEvent(self, e):
         """拖动中按 Esc 取消本次拖拽。"""
-        if e.key() == Qt.Key_Escape and self._drag_armed:
+        if e.key() == Qt.Key.Key_Escape and self._drag_armed:
             self._long_press_timer.stop()
             self._drag_armed = False
             self._press_pos = None
@@ -397,7 +397,7 @@ class DragReorderMixin:
             mime = QMimeData()
             mime.setData(_MIME_TYPE, str(self._press_row).encode())
             drag.setMimeData(mime)
-            drag.exec(Qt.MoveAction)
+            drag.exec(Qt.DropAction.MoveAction)
         finally:
             self._drag_exec_active = False
             self._drag_armed = False
@@ -457,11 +457,11 @@ class DragReorderMixin:
         self._drop_row = -1
         if dst_row < 0 or src_row < 0 or src_row >= self._dnd_count():
             # 无效目标：无顺序变化
-            e.setDropAction(Qt.IgnoreAction)
+            e.setDropAction(Qt.DropAction.IgnoreAction)
             e.accept()
             self.viewport().update()
             return
-        e.setDropAction(Qt.MoveAction)
+        e.setDropAction(Qt.DropAction.MoveAction)
         e.accept()
         self._move_row(src_row, dst_row)
         self.viewport().update()
@@ -589,4 +589,4 @@ class DragReorderTreeWidget(DragReorderMixin, ElidedToolTipMixin, QTreeWidget):
 
     def _dnd_row_allowed(self, row) -> bool:
         item = self.topLevelItem(row) if 0 <= row < self.topLevelItemCount() else None
-        return item is not None and item.data(0, Qt.UserRole) is not None
+        return item is not None and item.data(0, Qt.ItemDataRole.UserRole) is not None

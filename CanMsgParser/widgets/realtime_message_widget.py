@@ -11,12 +11,12 @@ import os
 import sys
 from datetime import datetime
 
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLineEdit, QLabel, QFileDialog, QAbstractItemView, QComboBox,
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 from workers.can_raw_capture_worker import CanRawCaptureWorker
 from core.can_utils import load_dbc, decode_frame
@@ -184,7 +184,7 @@ class RealtimeMessageWidget(QWidget):
         # 末列拉伸填满剩余宽度：原固定列宽合计 880px，宽屏下右侧留大片空白
         self._tree.header().setStretchLastSection(True)
         self._tree.setAlternatingRowColors(True)
-        self._tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # 双击报文行就地展开/折叠（QTreeWidget 默认行为），展开时补齐子项
         self._tree.itemExpanded.connect(self._on_item_expanded)
         layout.addWidget(self._tree, stretch=1)
@@ -270,9 +270,9 @@ class RealtimeMessageWidget(QWidget):
         self._capture_worker = CanRawCaptureWorker(
             self._interface_type, self._channel, self._bitrate
         )
-        self._capture_worker.frame_received.connect(self._on_frame, Qt.QueuedConnection)
-        self._capture_worker.status_changed.connect(self._on_status, Qt.QueuedConnection)
-        self._capture_worker.error_occurred.connect(self._on_error, Qt.QueuedConnection)
+        self._capture_worker.frame_received.connect(self._on_frame, Qt.ConnectionType.QueuedConnection)
+        self._capture_worker.status_changed.connect(self._on_status, Qt.ConnectionType.QueuedConnection)
+        self._capture_worker.error_occurred.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._capture_worker.start_monitoring()
         # 注册为共享总线的收帧监听者
         self._manager.add_listener(self._capture_worker.process_message)
@@ -534,7 +534,7 @@ class RealtimeMessageWidget(QWidget):
         self._value_descriptions（DBC 优先覆盖 Excel）。
 
         cantools 42 中 signal.choices 的值是 NamedSignalValue（str 子类），
-        而 PyQt5 的 setText 拒绝 str 子类，因此所有返回值都用 str() 归一化。
+        而 Qt 的 setText 拒绝 str 子类，因此所有返回值都用 str() 归一化。
         """
         if raw_val is None:
             return ""
@@ -660,7 +660,7 @@ class RealtimeMessageWidget(QWidget):
         self._status_label.setText(text)
 
     def _on_error(self, text):
-        from PyQt5.QtWidgets import QMessageBox
+        from PyQt6.QtWidgets import QMessageBox
         QMessageBox.critical(self, "实时报文错误", text)
         self.stop_capture()
         self._rec_btn.setEnabled(True)

@@ -10,7 +10,7 @@
 改版本只需改这里，其余位置都读取本常量。
 """
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 # 产品名（窗口标题、安装包、dmg 卷标共用）
 APP_NAME = "CanMsgParser"

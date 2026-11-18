@@ -1,5 +1,5 @@
 # widgets/plot_widget.py
-"""曲线图组件：matplotlib 嵌入 PyQt5，支持丰富的交互功能
+"""曲线图组件：matplotlib 嵌入 PyQt6，支持丰富的交互功能
 
 功能特性：
 - 共享Y轴 / 独立子图模式切换
@@ -14,10 +14,10 @@ import numpy as np
 import matplotlib
 import matplotlib.colors as mcolors
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QApplication
-from PyQt5.QtCore import Qt, QTimer
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QApplication
+from PyQt6.QtCore import Qt, QTimer
 from core.can_data import DecodedSignal
 from utils.lttb import lttb_downsample
 from utils.font_helper import UI_FONT_FAMILY, apply_matplotlib_fonts
@@ -295,7 +295,7 @@ class PlotWidget(QWidget):
 
         # 绘制中半透明加载层（覆盖在画布上，解码/绘图期间提示，避免误以为卡死）
         self._overlay = QLabel(self._canvas)
-        self._overlay.setAlignment(Qt.AlignCenter)
+        self._overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._overlay.setStyleSheet(
             "background-color: rgba(30,30,46,210); color:#4fc3f7; "
             "font-size:15px; font-weight:bold;"
@@ -2151,7 +2151,7 @@ class PlotWidget(QWidget):
         # Issue 3: 用 QApplication.keyboardModifiers() 而非 event.guiEvent.modifiers()
         # —— 前者在 Qt 各版本/各平台上都可靠。
         modifiers = QApplication.keyboardModifiers()
-        ctrl_pressed = bool(modifiers & Qt.ControlModifier)
+        ctrl_pressed = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
 
         # up 是往「放大」的方向（缩小显示范围），down 反之
         scale_factor = 0.85 if event.button == "up" else 1.15

@@ -1,29 +1,84 @@
 # main.py
 """CAN 报文分析工具 — 应用入口"""
+import faulthandler
 import os
 import sys
 import time
+import traceback
 
-# ── 高 DPI / 多屏自适应：必须在导入 PyQt5 之前设置环境变量 ──
+# ── 高 DPI / 多屏自适应：必须在导入 PyQt6 之前设置环境变量 ──
 # QT_AUTO_SCREEN_SCALE_FACTOR=1              → 启用「按屏幕」自动缩放，窗口移到不同
 #   DPI 的屏幕时 Qt 自动重算缩放比例（解决小分辨率屏上按钮/图表过大的问题）
 # QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough → 使用精确（非整数）缩放比例，避免
 #   分辨率/缩放变化后输入映射与渲染比例不一致导致的鼠标点击错位
-# QT_ENABLE_HIGHDPI_SCALING=1              → 与下方 AA_EnableHighDpiScaling 等效的开关
+# QT_ENABLE_HIGHDPI_SCALING=1              → 高 DPI 缩放开关（Qt6 已默认启用）
 os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
 os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
-from PyQt5.QtWidgets import QApplication, QMessageBox
-from PyQt5.QtCore import Qt
+# 崩溃日志：打包版崩溃时控制台往往没有任何输出，只能看到一个错误码。
+# faulthandler 会把 C 层调用栈写进文件，启动打点则记录卡在哪一步。
+# 默认只在打包态开启（源码态有 IDE 可看），用 CMP_BOOT_TRACE=1 可强制打开。
+_CRASH_FH = None
+_TRACE = os.environ.get("CMP_BOOT_TRACE") == "1" or bool(getattr(sys, "frozen", False))
+
+
+def _crash_log_path():
+    """崩溃日志位置：打包态写用户目录（安装目录可能只读）。"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "CanMsgParser", "crash.log")
+
+
+def _install_crash_logger():
+    """启用崩溃日志（失败时静默降级，不影响启动）。"""
+    global _CRASH_FH
+    try:
+        path = _crash_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fh = open(path, "a", encoding="utf-8", buffering=1)
+        fh.write("\n===== %s  frozen=%s  pid=%d =====\n"
+                 % (time.strftime("%Y-%m-%d %H:%M:%S"), bool(getattr(sys, "frozen", False)), os.getpid()))
+        fh.flush()
+        faulthandler.enable(file=fh, all_threads=True)
+
+        def _hook(exc_type, exc, tb):
+            try:
+                fh.write("".join(traceback.format_exception(exc_type, exc, tb)))
+                fh.flush()
+            except Exception:
+                pass
+            sys.__excepthook__(exc_type, exc, tb)
+
+        sys.excepthook = _hook
+        _CRASH_FH = fh
+    except Exception:
+        _CRASH_FH = None
+    return _CRASH_FH
+
+
+def _trace(msg):
+    """启动打点：只写崩溃日志，用于定位启动卡在哪一步。"""
+    if not _TRACE:
+        return
+    try:
+        line = "[boot] %s" % msg
+        print(line, flush=True)
+        if _CRASH_FH is not None:
+            _CRASH_FH.write(line + "\n")
+            _CRASH_FH.flush()
+    except Exception:
+        pass
+
+
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import Qt
 from utils.font_helper import UI_FONT_FAMILY
 from utils.ui_scale import init_ui_scale, scale_qss
 
 
 def main():
-    # 高 DPI 支持
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    # 高 DPI：Qt6 默认就启用高 DPI 缩放与 pixmap 缩放，
+    # AA_EnableHighDpiScaling / AA_UseHighDpiPixmaps 已从 Qt6 移除，不再设置。
     # 缩放比例使用精确值（不取整），避免分辨率/缩放变化后输入映射与渲染比例
     # 不一致导致的鼠标点击错位
     try:
@@ -33,11 +88,13 @@ def main():
         pass
 
     app = QApplication(sys.argv)
+    _trace("QApplication ok")
 
     # ── UI 等比缩放 ──
     # 按屏幕逻辑分辨率推算全局缩放系数（小屏收紧、超高分放大）。
     # 必须在构建任何 QSS / 控件之前完成，否则已生成的样式表不会带上缩放值。
     ui_scale = init_ui_scale()
+    _trace("init_ui_scale ok %.3f" % ui_scale)
     print(f"[UI] 屏幕逻辑分辨率自适应缩放系数: {ui_scale:.3f}")
 
     # ── 启动前依赖库检测 ──
@@ -53,6 +110,7 @@ def main():
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # 依赖就绪，继续正常启动
+    _trace("dependency check ok")
     app.setApplicationName("CanMsgParser")
 
     # 全局暗色主题样式（补充 MainWindow 自身 QSS 未覆盖的应用级控件）
@@ -207,9 +265,11 @@ def main():
 
     # ---- 启动画面 ----
     # 延迟导入：确保依赖检测通过后再加载重模块
+    _trace("importing main_window ...")
     from main_window import MainWindow
     from widgets.splash_screen import SplashScreen
 
+    _trace("main_window imported")
     splash = SplashScreen()
     splash.show()
     app.processEvents()
@@ -229,7 +289,9 @@ def main():
         splash.update_progress(progress, status)
         time.sleep(0.15)          # 短暂延迟让用户看到进度动画
         if progress == 85:
+            _trace("creating MainWindow ...")
             main_window = MainWindow()
+            _trace("MainWindow created")
 
     # 确保主窗口已创建
     if main_window is None:
@@ -241,8 +303,10 @@ def main():
     main_window.show()
     splash.finish(main_window)
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
+    _install_crash_logger()
+    _trace("entry")
     main()
