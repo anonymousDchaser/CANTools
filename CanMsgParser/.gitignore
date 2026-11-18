@@ -40,6 +40,11 @@ tests/_dbg.py
 .AppleDouble
 ._*
 
+# macOS 应用图标与中间 iconset（由 tools/make_icns.py 在 macOS 上生成，
+# 每个架构/每次改动都可重建，不入库）
+app.icns
+AppIcon.iconset/
+
 # 虚拟环境（macOS 用户按 README 在 .venv 中安装依赖）
 .venv/
 venv/

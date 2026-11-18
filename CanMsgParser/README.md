@@ -1,9 +1,24 @@
-# CAN 报文分析工具 (CanMsgParser) v1.3.0
+# CAN 报文分析工具 (CanMsgParser) v1.4.0
 
 基于 PyQt5 的 CAN 报文分析桌面工具，支持 DBC 解析、信号检索与分组、曲线绘制、
 实时监控、信号模拟上报、报文回放与录制（BLF / ASC）等功能。
 
 ## 版本说明
+
+- **v1.4.0**：拖放识别与 macOS 分发。
+  **拖放**：把 `.blf` / `.asc` 日志拖入应用，会**同时**成为「待分析报文」（分析页）
+  与「可回放报文」（回放页），无需在两个页面各选一次文件；日志也可直接拖到回放页，
+  同样会同步到分析页（`.log` / `.csv` 只有回放页支持，仅在本页使用）。回放页仍可用
+  「选择文件」另选一份覆盖当前报文。
+  **报文回放修复**：① 未连接设备时不再静默返回（改为按连接页参数自动连接，失败弹窗）；
+  ② 重写回放时钟——旧实现每帧新建 `QTimer` 且逐帧刷新标签，实测只有 **194 帧/秒**
+  （0.33s 的日志要播 3s，表现为「进度几乎不动」），现改为常驻定时器 + 单调时钟批量补发，
+  1x 恢复 1700+ 帧/秒、严格贴合原始时间轴。
+  **macOS 分发**：新增 `build_installer.py`（macOS 出 `.dmg` + 便携 zip、Windows 出
+  Setup + 便携 zip）、`tools/make_icns.py`（生成 `app.icns`）与 GitHub Actions
+  workflow（无 Mac 机时在 runner 上真实构建 arm64 / x86_64 两套产物）；并修复两个
+  macOS 阻断问题：启动依赖检查在打包态仍尝试 `pip install`（`.app` 内必然失败）、
+  录制默认目录落在只读的 `.app` 包内。
 
 - **v1.3.0**：曲线图交互与性能专项优化。
   **性能**：曲线图悬停提示、时间差标记拖动的响应耗时大幅下降（悬停约 236ms → 38ms、
@@ -199,6 +214,9 @@ ASC 文件会正常补写结束标记（`End TriggerBlock`），可直接用 CAN
 PyQt5 matplotlib cantools python-can pandas numpy openpyxl xlrd lxml uptime
 ```
 
+`uptime` 仅 Windows 的 PEAK(PCAN) 后端需要：macOS / Linux 上 PCAN 驱动本身不可用，
+因此启动依赖检查会按平台跳过它，macOS 安装依赖时也可忽略（CI 工作流就是这么做的）。
+
 - 完整清单见 `requirements.txt`（其中 `pytest` 仅用于开发自测、`pyinstaller`
   仅用于打包，**运行时不需要**）。
 - **Python 版本**：推荐 **3.11 / 3.12**。PyQt5 5.15.11（当前最新版）官方支持到
@@ -212,49 +230,68 @@ python main.py
 
 ## 打包
 
+一条命令出「应用本体 + 分发产物」：
+
 ```bash
-python build.py
+python build.py                     # 应用本体（onedir，启动快）
+python build.py --onefile           # 单文件（便于分发，启动稍慢）
+python build.py --check             # 只打印将要执行的 PyInstaller 命令，不打包
+python build_installer.py --build   # 先构建，再出安装包 / 磁盘映像 + 便携 zip
 ```
 
-`build.py` 会自动按当前平台选择参数，产物路径如下：
-
-| 平台 | 产物 |
-| --- | --- |
-| Windows | `dist/CanMsgParser/CanMsgParser.exe`（无控制台窗口，onedir 模式） |
-| macOS | `dist/CanMsgParser.app`（双击运行，或 `open dist/CanMsgParser.app`） |
-| Linux | `dist/CanMsgParser/CanMsgParser` |
+| 平台 | 应用本体 | 分发产物（`installer/output/`） |
+| --- | --- | --- |
+| Windows | `dist/CanMsgParser/CanMsgParser.exe` | `CanMsgParser_Setup_<版本>.exe`、`CanMsgParser-<版本>-win64-portable.zip` |
+| macOS | `dist/CanMsgParser.app` | `CanMsgParser-<版本>-macos-<arch>.dmg`、`...-portable.zip` |
+| Linux | `dist/CanMsgParser/CanMsgParser` | 仅便携目录（无安装包脚本） |
 
 `build.py` 会将上一版 `dist/`、`build/`、`.spec` 改名移入 `.build_trash/`（已被
 `.gitignore` 忽略），不再保留编译产物备份。
 
+**版本号只有一个来源**：`version.py` 的 `APP_VERSION`。窗口标题、关于对话框、
+`installer.iss`（由 `build_installer.py` 用 `/DMyAppVersion=` 覆盖）、dmg / zip /
+Setup 文件名全部读它，发版只需改这一处。
+
 ### Windows 安装包（Inno Setup）
 
-`dist/CanMsgParser/` 本身已是自包含产物，可整个目录直接分发；若需要带开始菜单 /
-桌面快捷方式与卸载入口的安装包，用 `installer/installer.iss`（Inno Setup 6）编译：
+`build_installer.py` 会自动查找 `ISCC.exe`（也支持环境变量 `INNO_SETUP_ISCC`
+指定），并传入版本号：
 
 ```bash
-# 1) 先构建 dist（安装包只做「搬运 + 快捷方式 + 卸载入口」，不下载任何外部依赖）
-python build.py
-
-# 2) 再编译安装包（ISCC.exe 路径按本机安装位置调整）
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss
+python build_installer.py           # 用现有 dist/ 出 Setup + 便携 zip
+python build_installer.py --build   # 一条龙：build.py → Setup + 便携 zip
 ```
 
-产物为 `installer/output/CanMsgParser_Setup_<版本>.exe`。
-
-- `installer/installer.iss` 纳入版本管理；产物 `installer/output/CanMsgParser_Setup_<版本>.exe`
-  与 `dist/` 一样**不入库**（`.gitignore` 已忽略），改由 GitHub Release 的附件下发。
-- 版本号在 `installer.iss` 的 `MyAppVersion` 定义，需与 `main_window.py` 窗口标题 /
-  关于对话框、`widgets/splash_screen.py`、本 README 标题**四处保持一致**。
+- `installer/installer.iss` 纳入版本管理；产物 `installer/output/` 与 `dist/` 一样
+  **不入库**（`.gitignore` 已忽略），改由 GitHub Release 的附件下发。
 - 用户级安装（`PrivilegesRequired=lowest` + `DefaultDirName={localappdata}`），全程
   无需管理员权限；`ArchitecturesAllowed=x64compatible` 与 x64 的 Python 3.14 构建一致。
 - `AppId` 是卸载 / 升级识别的唯一标识，**发布后不要再改**，否则会被识别成两套程序。
 
-> **跨平台说明**：原先字体只写了 Windows 字体，macOS 下曲线图中文会显示为方框
-> （回落到不含中文字形的 DejaVu Sans）。现统一由 `utils/font_helper.py` 按平台
-> 给出字体候选——Windows 用 Microsoft YaHei、macOS 用 PingFang SC、Linux 用
-> Noto Sans CJK SC，三者互为兜底，`build.py` 的 Windows 专属参数
-> （`--manifest` / `--noconsole`）也已在非 Windows 平台跳过。
+### macOS 安装包（.app / .dmg）
+
+```bash
+python3 tools/make_icns.py          # 生成 app.icns（依赖 macOS 自带 iconutil）
+python3 build_installer.py --build  # 打包 .app，再出 dmg 与便携 zip
+```
+
+- 图标：有 `app.png` 就用它，否则 `make_icns.py` 会画一个内置默认图标（深色底 +
+  `CAN` 字样），保证 `.app` 不是空白图标。`app.ico` 是 Windows 专用，macOS 不认。
+- dmg 内含指向 `/Applications` 的软链接，用户打开后直接拖入即可；`.app` 会做
+  ad-hoc 签名（`codesign --sign -`），避免新版 macOS 报「已损坏」。
+- 便携 zip 用 `ditto` 打包（保留符号链接与可执行位）；用普通 `zipfile` 会破坏
+  `.app` 结构导致无法启动。
+
+> **跨平台说明**：PyInstaller 不支持交叉编译——Windows 上只能产出 `.exe`，
+> `.app` / `.dmg` 必须在 macOS 上生成。没有 Mac 机时走
+> `.github/workflows/build-canmsgparser-macos.yml`（GitHub macOS runner），
+> 手动 `Run workflow` 即可得到 arm64 / x86_64 两套真实产物。
+
+> **跨平台说明（字体与参数）**：字体统一由 `utils/font_helper.py` 按平台给出候选
+> （Windows Microsoft YaHei / macOS PingFang SC / Linux Noto Sans CJK SC，互为兜底）；
+> `build.py` 的 Windows 专属参数（`--manifest` / `--noconsole`）与硬件后端
+> （PCAN / Vector / uptime）在非 Windows 平台自动跳过。`tests/test_build_platform.py`
+> 对这两条做了回归断言。
 
 ## macOS 环境搭建与编译
 
@@ -314,14 +351,19 @@ python main.py
 ### 4. 编译为 .app
 
 ```bash
-python build.py
-```
-
-产物为 `dist/CanMsgParser.app`：
-
-```bash
+python tools/make_icns.py           # 可选：生成 app.icns（无 app.png 则用默认图标）
+python build.py                     # 产物 dist/CanMsgParser.app
 open dist/CanMsgParser.app
 ```
+
+需要分发给别人时，再出一条 dmg（内含拖入 `/Applications` 的快捷方式）与便携 zip：
+
+```bash
+python build_installer.py           # installer/output/*.dmg 与 *-portable.zip
+```
+
+> 没有 Mac 机器也能拿到真实产物：推送到 GitHub 后手动运行
+> `build-canmsgparser-macos.yml`，在 macOS runner 上构建 arm64 / x86_64 两套。
 
 ### 5. macOS 常见问题
 
