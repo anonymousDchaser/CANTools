@@ -6,10 +6,11 @@
     p.show() 这一行，再往里没有 Python 帧可用，所以靠栈区分不出责任方。
     这里给每个最小场景起一个独立子进程，谁卡住谁就是责任方。
 
-第一轮结论（2026-11）：
-    QDockWidget + 裸 QWidget 正常、QDockWidget + SignalTreeWidget 正常，
-    但 SignalGroupPanel 只要 show() 就卡（连 dock 都不需要），
-    因此责任人锁定在面板自身，与 QDockWidget 无关。
+已排除（2026-11 两轮结论）：
+    - QDockWidget 无关：面板单独 show 就卡；
+    - 构造、resize 不卡，卡在 show()；
+    - 不是列宽自适应（禁用后仍卡）、不是信号树（hide 后仍卡）、
+      不是 DARK_PANEL_QSS（裸 QWidget 套同样样式正常）。
 
 用法::
 
@@ -31,49 +32,49 @@ CASES = [
         "A-dock-plain-show",
         "对照：QDockWidget + 裸 QWidget + 窗口 show()",
         "win = QMainWindow(); d = QDockWidget('t', win)\n"
-        "d.setWidget(QWidget()); win.addDockWidget(Qt.LeftDockWidgetArea, d); win.show()",
+        "d.setWidget(QWidget()); win.addDockWidget(Qt.LeftDockWidgetArea, d); win.show()\n"
+        "print('CASE OK', flush=True)",
     ),
     (
-        "B-panel-construct",
-        "只构造 SignalGroupPanel（不 show）",
-        _PANEL + "p = SignalGroupPanel()",
+        "B-panel-show",
+        "基线：构造 + show()",
+        _PANEL + "p = SignalGroupPanel(); p.show()\n"
+        "print('CASE OK', flush=True)",
     ),
     (
-        "C-panel-resize",
-        "构造 + resize(420, 640)（不 show）",
-        _PANEL + "p = SignalGroupPanel(); p.resize(420, 640)",
+        "C-panel-hide-children-show",
+        "构造 + 隐藏全部直接子控件 + show()",
+        _PANEL + "p = SignalGroupPanel()\n"
+        "for w in p.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):\n"
+        "    w.hide()\n"
+        "p.show()\n"
+        "print('CASE OK', flush=True)",
     ),
     (
-        "D-panel-show",
-        "构造 + show()（基线复现）",
-        _PANEL + "p = SignalGroupPanel(); p.show()",
-    ),
-    (
-        "E-panel-show-no-autosize",
-        "构造 + 把 _autosize_signal_column 换成 no-op + show()",
-        _PANEL + "p = SignalGroupPanel(); p._autosize_signal_column = lambda: None; p.show()",
-    ),
-    (
-        "F-panel-show-tree-hidden",
-        "构造 + 信号树 hide() + show()",
-        _PANEL + "p = SignalGroupPanel(); p._sig_list.hide(); p.show()",
-    ),
-    (
-        "G-qss-only",
-        "对照：裸 QWidget 套 DARK_PANEL_QSS + show()",
-        "from widgets.theme import DARK_PANEL_QSS\n"
-        "w = QWidget(); w.setStyleSheet(DARK_PANEL_QSS); w.resize(420, 640); w.show()",
-    ),
-    (
-        "H-tree-standalone",
-        "对照：单独 show 一个 DragReorderTreeWidget（带同样列设置）",
-        "from PyQt5.QtWidgets import QHeaderView\n"
-        "from widgets.drag_reorder_list import DragReorderTreeWidget\n"
-        "t = DragReorderTreeWidget(); t.setColumnCount(2)\n"
-        "t.setHeaderLabels(['信号', '备注'])\n"
-        "t.header().setSectionResizeMode(0, QHeaderView.Interactive)\n"
-        "t.header().setSectionResizeMode(1, QHeaderView.Stretch)\n"
-        "t.setColumnWidth(0, 150); t.resize(420, 480); t.show()",
+        "D-panel-stepwise-children",
+        "构造 + 先隐藏全部子控件 + show，再逐个显示并打点（卡住时最后一行就是责任控件）",
+        _PANEL + "from PyQt5.QtCore import QTimer\n"
+        "p = SignalGroupPanel()\n"
+        "kids = p.findChildren(QWidget, options=Qt.FindDirectChildrenOnly)\n"
+        "for w in kids:\n"
+        "    w.hide()\n"
+        "p.show()\n"
+        "print('panel shown, direct children =', len(kids), flush=True)\n"
+        "state = {'i': 0}\n"
+        "def step():\n"
+        "    i = state['i']\n"
+        "    if i >= len(kids):\n"
+        "        print('ALL CHILDREN SHOWN OK', flush=True)\n"
+        "        app.quit()\n"
+        "        return\n"
+        "    w = kids[i]\n"
+        "    print('showing', i, w.__class__.__name__, flush=True)\n"
+        "    w.show()\n"
+        "    state['i'] = i + 1\n"
+        "    QTimer.singleShot(300, step)\n"
+        "QTimer.singleShot(300, step)\n"
+        "app.exec_()\n"
+        "print('CASE OK', flush=True)",
     ),
 ]
 
@@ -84,7 +85,6 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QDockWidget, QWidget
 app = QApplication([])
 {middle}
-print('CASE OK', flush=True)
 """
 
 
