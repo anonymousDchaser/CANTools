@@ -4,7 +4,18 @@ import faulthandler
 import sys
 import os
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 平台选择：
+#   本机开发默认 offscreen（不弹窗、不抢焦点）；
+#   CI 上必须用 native —— 实测 Qt5 的 offscreen 插件在 macOS 上会在
+#   QDockWidget.setWidget() 处死锁（faulthandler 抓到的栈就在这一行），
+#   而同一份代码用原生 cocoa 平台可以正常构造主窗口。
+_plat = os.environ.get("SMOKE_PLATFORM", "")
+if _plat == "native":
+    os.environ.pop("QT_QPA_PLATFORM", None)
+elif _plat:
+    os.environ["QT_QPA_PLATFORM"] = _plat
+else:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # 为什么开这个：CI 上曾出现「构造主窗口后再无任何输出、job 一直 in_progress」
 # 的情况（Windows 本地可通过）。死锁时没有人来按 Ctrl+C，只能等 job 超时，

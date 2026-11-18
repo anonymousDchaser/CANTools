@@ -64,12 +64,16 @@ jobs:
       # 分步且各自限时：实测出现过「构造主窗口后不再输出、job 一直 in_progress」，
       # 三步合在一起时既看不出卡在哪个脚本，也只能等 job 超时才失败。
       # SMOKE_TIMEOUT 让测试自己在死锁时打印调用栈，日志里能直接定位。
-      - name: 冒烟测试 · 主窗口接线（离屏）
+      #
+      # 这里**不用** QT_QPA_PLATFORM=offscreen：Qt5 的 offscreen 插件在 macOS 上
+      # 会在 QDockWidget.setWidget() 死锁（faulthandler 栈已确认），换原生平台后才跑得通。
+      # macOS runner 本身有图形会话，cocoa 可正常创建 QApplication（生成 app.icns 那步就是）。
+      - name: 冒烟测试 · 主窗口接线（原生平台）
         timeout-minutes: 6
         env:
-          QT_QPA_PLATFORM: offscreen
           PYTHONUNBUFFERED: "1"
           SMOKE_TIMEOUT: "90"
+          SMOKE_PLATFORM: native
         run: python -u -m tests.test_mainwindow_smoke
 
       - name: 冒烟测试 · 回放页与打包命令
