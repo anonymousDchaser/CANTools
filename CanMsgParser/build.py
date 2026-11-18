@@ -186,8 +186,10 @@ def build_cmd():
 
     cmd += [
         # 剔除用不到的大模块，减小体积
+        # ⚠️ 不要再排除 unittest：macOS 上 pyparsing（matplotlib 的依赖）在
+        #    pyparsing/testing.py 里 `import unittest`，排除后 .app 启动即崩
+        #    （ModuleNotFoundError: No module named 'unittest'）。它本身只有几百 KB。
         "--exclude-module", "tkinter",
-        "--exclude-module", "unittest",
         "--exclude-module", "pydoc_data",
         "--exclude-module", "PyQt5.QtWebEngineCore",
         "--exclude-module", "PyQt5.QtWebEngineWidgets",
