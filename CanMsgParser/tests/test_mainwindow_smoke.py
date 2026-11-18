@@ -5,10 +5,10 @@ import sys
 import os
 
 # 平台选择：
-#   本机开发默认 offscreen（不弹窗、不抢焦点）；
-#   CI 上必须用 native —— 实测 Qt5 的 offscreen 插件在 macOS 上会在
-#   QDockWidget.setWidget() 处死锁（faulthandler 抓到的栈就在这一行），
-#   而同一份代码用原生 cocoa 平台可以正常构造主窗口。
+#   本机开发默认 offscreen（不弹窗、不抢焦点）；CI 用 native（runner 有图形会话，
+#   更接近真实运行环境）。两者都能跑——2026-11 那次 CI 卡死与平台无关：真因是
+#   SignalGroupPanel 列宽计算与滚动条互相反馈形成死循环（见该文件的说明），
+#   setWidget 只是触发点。
 _plat = os.environ.get("SMOKE_PLATFORM", "")
 if _plat == "native":
     os.environ.pop("QT_QPA_PLATFORM", None)

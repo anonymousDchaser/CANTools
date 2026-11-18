@@ -456,14 +456,31 @@ class SignalGroupPanel(QWidget):
                 stack.append((item.child(k), depth + 1))
         if not widest:
             return  # 列表为空：保持当前列宽，避免抖动
-        # 面板可能过窄，给一个下限宽度保证「信号」列可用（备注列仍可滚动查看）
-        avail = max(tree.viewport().width(), dp(240))
-        tree.setColumnWidth(0, min(max(widest, dp(120)), int(avail * 0.6)))
+        # ⚠️ 上限基数必须用**面板宽度**，不能用 tree.viewport().width()：
+        # viewport 宽度会随「列宽变化 → 横向滚动条出现/消失」而变，
+        # 拿它算列宽就构成反馈环——列宽变宽→出滚动条→viewport 变窄→列宽变窄
+        # →滚动条消失→列宽又变宽…… 在 macOS 上（系统字体更宽，更容易跨过这个
+        # 阈值）会无限震荡，表现为 QDockWidget.setWidget() 永久卡死
+        # （CI 的 faulthandler 栈就停在 main_window._setup_docks 的 setWidget 那行）。
+        # 面板宽度只由 dock 决定，不会被列宽反向影响，环即断开。
+        avail = max(self.width(), dp(240))
+        new_width = min(max(widest, dp(120)), int(avail * 0.6))
+        # 值没变就不写：setColumnWidth 会再走一遍布局，无谓的重入没有收益
+        if new_width != tree.columnWidth(0):
+            tree.setColumnWidth(0, new_width)
 
     def resizeEvent(self, event):
-        """面板宽度变化时重算信号列宽（列宽上限取决于视口宽度）。"""
+        """面板宽度变化时重算信号列宽（列宽上限取决于面板宽度）。"""
         super().resizeEvent(event)
-        self._autosize_signal_column()
+        # 防重入：setColumnWidth 会再次触发布局/尺寸事件；计算依据虽已与列宽
+        # 解耦，仍加一道闸，避免任何残余路径把手改列宽变成递归。
+        if getattr(self, "_in_autosize", False):
+            return
+        self._in_autosize = True
+        try:
+            self._autosize_signal_column()
+        finally:
+            self._in_autosize = False
 
     def _match_sig(self, sig_ref: SignalRef, text: str) -> bool:
         """按信号名 / 报文名 / 帧 ID / 备注内容匹配（不区分大小写）。"""
