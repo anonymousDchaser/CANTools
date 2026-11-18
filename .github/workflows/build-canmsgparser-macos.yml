@@ -61,18 +61,6 @@ jobs:
       - name: 生成 app.icns
         run: python tools/make_icns.py
 
-      # 诊断探针：用独立子进程分别试「裸 QWidget / SignalGroupPanel / 只 show 面板 /
-      # SignalTreeWidget」放进 QDockWidget，谁卡住谁负责。Python 栈只能停到
-      # setWidget 那一行，靠它区分不出责任方，所以这里不靠栈靠二分。
-      # 诊断期间失败不阻塞产物；问题定位并修掉后应改回硬失败。
-      - name: 诊断 · dock 卡死最小复现
-        continue-on-error: true
-        timeout-minutes: 6
-        env:
-          QT_QPA_PLATFORM: offscreen
-          PYTHONUNBUFFERED: "1"
-        run: python -u tools/ci_gui_probe.py
-
       # 分步且各自限时：实测出现过「构造主窗口后不再输出、job 一直 in_progress」，
       # 三步合在一起时既看不出卡在哪个脚本，也只能等 job 超时才失败。
       # SMOKE_TIMEOUT 让测试自己在死锁时打印调用栈，日志里能直接定位。
@@ -81,7 +69,6 @@ jobs:
       # （生成 app.icns 那步也在用它）。注意那次卡死与平台无关，真因是
       # SignalGroupPanel 的列宽反馈环，已在产品代码里修掉。
       - name: 冒烟测试 · 主窗口接线（原生平台）
-        continue-on-error: true
         timeout-minutes: 6
         env:
           PYTHONUNBUFFERED: "1"
@@ -126,6 +113,7 @@ jobs:
           else
             echo "启动后自行退出，输出："
             cat /tmp/app-run.log
+            cat ~/CanMsgParser/crash.log 2>/dev/null || true
             exit 1
           fi
 
