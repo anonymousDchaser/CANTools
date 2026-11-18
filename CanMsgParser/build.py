@@ -26,11 +26,16 @@ macOS 说明:
       app.ico 是 Windows 专用，macOS 上 PyInstaller 不认。
     - 目标架构由环境变量 PYI_TARGET_ARCH 指定（arm64 / x86_64），
       缺省跟随当前解释器；Apple Silicon 上要出 Intel 包时才需要显式设置。
+    - 打包完成后会把 version.APP_VERSION 写进 Info.plist 并重新 ad-hoc 签名：
+      PyInstaller 命令行没有「设置 bundle 版本」的参数，默认恒为 0.0.0，
+      与窗口标题/安装包版本对不上；而改过 Info.plist 签名即失效。
 """
 import os
 import sys
 import subprocess
 import shutil
+
+from version import APP_VERSION
 
 APP_NAME = "CanMsgParser"
 MAIN_SCRIPT = "main.py"
@@ -63,6 +68,47 @@ def _dir_size(path):
             if os.path.isfile(fp) and not os.path.islink(fp):
                 total += os.path.getsize(fp)
     return total
+
+
+def _patch_macos_bundle(app_path):
+    """把版本号写进 .app 的 Info.plist，并重新做 ad-hoc 签名。
+
+    为什么必须做：
+      ① PyInstaller 命令行没有「设置 bundle 版本」的参数，产出的
+         CFBundleShortVersionString 恒为 0.0.0，与窗口标题、安装包版本不一致；
+      ② 改动 Info.plist 会让 PyInstaller 生成的 ad-hoc 签名失效，Apple Silicon
+         上系统会直接拒绝启动（code signature invalid），所以必须重签。
+    只做尽力修正：任何一步失败都打印原因，但不中断已经打好的产物。
+    """
+    plist = os.path.join(app_path, "Contents", "Info.plist")
+    if not os.path.exists(plist):
+        print(f"警告: 未找到 {plist}，跳过 bundle 版本号写入")
+        return
+
+    for key in ("CFBundleShortVersionString", "CFBundleVersion"):
+        r = subprocess.run(
+            ["/usr/libexec/PlistBuddy", "-c", f"Set :{key} {APP_VERSION}", plist],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            # 键不存在时 Set 会失败，退化为 Add（不同 PyInstaller 版本字段集不同）
+            r = subprocess.run(
+                ["/usr/libexec/PlistBuddy",
+                 "-c", f"Add :{key} string {APP_VERSION}", plist],
+                capture_output=True, text=True,
+            )
+        if r.returncode != 0:
+            print(f"警告: 写入 {key} 失败: {(r.stderr or r.stdout).strip()}")
+
+    r = subprocess.run(
+        ["codesign", "--force", "--deep", "--sign", "-", app_path],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        print(f"已写入 bundle 版本 {APP_VERSION} 并重新 ad-hoc 签名")
+    else:
+        print("警告: 重新签名失败（App 可能被 Gatekeeper 拒绝启动）: "
+              f"{(r.stderr or r.stdout).strip()[:400]}")
 
 
 def build_cmd():
@@ -221,6 +267,8 @@ def build():
         print(f"产物: {os.path.abspath(artifact)}")
         print(f"大小: {raw_size / 1024 / 1024:.1f} MB")
         if IS_MAC:
+            if artifact.endswith(".app"):
+                _patch_macos_bundle(artifact)
             print(f"运行: open {artifact}")
     else:
         print(f"警告: 未找到输出产物: {artifact}")

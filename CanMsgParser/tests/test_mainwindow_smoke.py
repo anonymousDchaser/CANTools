@@ -1,9 +1,16 @@
 # tests/test_mainwindow_smoke.py
 """主窗口级冒烟：验证共享连接管理器接线 + 连接状态页真正建总线（虚拟通道）。"""
+import faulthandler
 import sys
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# 为什么开这个：CI 上曾出现「构造主窗口后再无任何输出、job 一直 in_progress」
+# 的情况（Windows 本地可通过）。死锁时没有人来按 Ctrl+C，只能等 job 超时，
+# 而且拿不到卡在哪一行。dump_traceback_later 到点会把**当前调用栈**打进
+# stderr 再退出，日志里就能直接看到卡住的函数。
+SMOKE_TIMEOUT = int(os.environ.get("SMOKE_TIMEOUT", "90"))
 
 from PyQt5.QtWidgets import QApplication
 
@@ -13,8 +20,13 @@ from core.can_connection import CanConnectionManager
 
 
 def main():
+    faulthandler.dump_traceback_later(SMOKE_TIMEOUT, exit=True)
+    # CI 的 stdout 是管道，默认块缓冲会让日志停在半截、看不出卡在哪个阶段
+    sys.stdout.reconfigure(line_buffering=True)
     app = QApplication(sys.argv)
+    print("OK: QApplication 就绪", flush=True)
     mw = main_window.MainWindow()
+    print("OK: MainWindow 构造完成", flush=True)
 
     # 1) 管理器已创建并注入三页
     assert isinstance(mw._conn_manager, CanConnectionManager)
@@ -51,7 +63,8 @@ def main():
     print("OK: 断开后功能页动作可自动重新连接（问题2 场景）")
 
     mw.close()
-    print("MAINWINDOW SMOKE PASSED")
+    print("MAINWINDOW SMOKE PASSED", flush=True)
+    faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == "__main__":

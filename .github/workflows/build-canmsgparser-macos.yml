@@ -24,6 +24,9 @@ jobs:
   build:
     name: macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    # 兜底：任何一步意外挂死（GUI 初始化、hdiutil 卡住）都别耗到 GitHub 的
+    # 6 小时上限，45 分钟足够「装依赖 + 打包 + 出 dmg」跑两遍
+    timeout-minutes: 45
     # Intel 机型的 runner 标签变动较频繁，标记为实验性：失败不阻塞 arm64 产物
     continue-on-error: ${{ matrix.experimental }}
     strategy:
@@ -58,13 +61,25 @@ jobs:
       - name: 生成 app.icns
         run: python tools/make_icns.py
 
-      - name: 冒烟测试（离屏实例化主窗口）
+      # 分步且各自限时：实测出现过「构造主窗口后不再输出、job 一直 in_progress」，
+      # 三步合在一起时既看不出卡在哪个脚本，也只能等 job 超时才失败。
+      # SMOKE_TIMEOUT 让测试自己在死锁时打印调用栈，日志里能直接定位。
+      - name: 冒烟测试 · 主窗口接线（离屏）
+        timeout-minutes: 6
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUNBUFFERED: "1"
+          SMOKE_TIMEOUT: "90"
+        run: python -u -m tests.test_mainwindow_smoke
+
+      - name: 冒烟测试 · 回放页与打包命令
+        timeout-minutes: 8
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUNBUFFERED: "1"
         run: |
-          python -m tests.test_mainwindow_smoke
-          python tests/test_replay_widget.py
-          python tests/test_build_platform.py
+          python -u tests/test_replay_widget.py
+          python -u tests/test_build_platform.py
 
       - name: 打包 .app
         env:
@@ -74,11 +89,58 @@ jobs:
       - name: 制作 dmg 与便携 zip
         run: python build_installer.py
 
-      - name: 校验产物
+      # 真机校验：只 verify 容器不够，还要把 dmg 挂起来确认 .app 能执行、
+      # 架构与版本号都对得上（交叉架构产物最容易在这里露出马脚）。
+      # 启动冒烟：直接跑 .app 里的可执行文件，8 秒内不自己退出就算通过。
+      # 标 continue-on-error：runner 无登录窗口会话时 cocoa 可能起不来，
+      # 这一项失败不该把已经打好的 dmg 一起废掉（挂载/架构/版本校验才是硬门槛）。
+      - name: 启动冒烟（.app 可执行文件 8s 存活）
+        continue-on-error: true
+        timeout-minutes: 3
         run: |
+          BIN="dist/CanMsgParser.app/Contents/MacOS/CanMsgParser"
+          test -x "$BIN" || { echo "缺少可执行文件"; exit 1; }
+          "$BIN" > /tmp/app-run.log 2>&1 &
+          PID=$!
+          sleep 8
+          if kill -0 $PID 2>/dev/null; then
+            echo "启动 8s 存活 OK（pid $PID）"
+            kill $PID || true
+          else
+            echo "启动后自行退出，输出："
+            cat /tmp/app-run.log
+            exit 1
+          fi
+
+      - name: 校验产物（dmg 完整性 + 挂载 + 架构 + 版本）
+        run: |
+          set -euo pipefail
           ls -lh installer/output
           test -n "$(ls installer/output/*.dmg)" || { echo "没有产出 dmg"; exit 1; }
           hdiutil verify installer/output/*.dmg
+
+          WANT_VER="$(python -c 'import version; print(version.APP_VERSION)')"
+          DMG="$(ls installer/output/*.dmg | head -1)"
+          MNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MNT" >/dev/null
+          trap 'hdiutil detach "$MNT" -quiet || true' EXIT
+
+          APP="$(ls -d "$MNT"/*.app | head -1)"
+          BIN="$APP/Contents/MacOS/CanMsgParser"
+          test -x "$BIN" || { echo "dmg 内缺少可执行文件"; exit 1; }
+          test -L "$MNT/Applications" || { echo "dmg 内缺少 /Applications 拖拽入口"; exit 1; }
+
+          # 先取到变量再比对：pipefail 下 `lipo | grep -q` 会因 grep 提前退出
+          # 让 lipo 收到 SIGPIPE（exit 141），整条命令误判失败
+          ARCH_INFO="$(lipo -info "$BIN")"
+          echo "$ARCH_INFO"
+          echo "$ARCH_INFO" | grep -q "${{ matrix.arch }}" || { echo "架构不是 ${{ matrix.arch }}"; exit 1; }
+
+          GOT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          echo "CFBundleShortVersionString = $GOT_VER（期望 $WANT_VER）"
+          test "$GOT_VER" = "$WANT_VER" || { echo "版本号不一致"; exit 1; }
+
+          echo "dmg 挂载校验通过：$APP"
 
       - uses: actions/upload-artifact@v4
         with:
