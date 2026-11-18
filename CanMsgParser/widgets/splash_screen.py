@@ -8,6 +8,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtCore import Qt, QRectF, QPointF
 from utils.font_helper import ui_font
+from version import APP_VERSION
 
 
 class SplashScreen(QSplashScreen):
@@ -93,7 +94,8 @@ class SplashScreen(QSplashScreen):
         painter.drawText(
             QRectF(0, 58, self.SPLASH_W, 20),
             Qt.AlignCenter,
-            "CAN Bus Message Analysis Tool  v1.3.0",
+            "CAN Bus Message Analysis Tool  "
+            f"v{APP_VERSION}",
         )
 
     def _draw_car(self, painter: QPainter, x: int, y: int):

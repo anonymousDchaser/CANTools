@@ -17,16 +17,32 @@ REQUIRED_PACKAGES = [
     ("openpyxl", "openpyxl"),
     ("xlrd", "xlrd==1.2.0"),  # 固定 1.2.0 支持 .xls
     ("lxml", "lxml"),
-    ("uptime", "uptime"),  # PEAK(PCAN) 后端所需，缺失会报 uptime library not available
 ]
+
+# uptime 只被 PEAK(PCAN) 后端使用，且该包按 Windows 的开机时长实现；
+# macOS / Linux 上 PCAN 驱动本身不可用，把它列为「必需」会导致 mac 版
+# 一启动就弹「依赖缺失」，进而在 .app 里 pip install 失败而无法启动。
+if sys.platform == "win32":
+    REQUIRED_PACKAGES.append(("uptime", "uptime"))
+
+
+def _is_frozen() -> bool:
+    """是否运行在 PyInstaller 产物中。"""
+    return bool(getattr(sys, "frozen", False))
 
 
 def check_dependencies() -> list[tuple[str, str]]:
     """检查所有必需依赖库是否已安装。
 
+    打包态直接返回空列表：依赖已随产物分发，pip 无法也不应再改产物内容；
+    若仍逐个 import 检查，任何一个被 PyInstaller 漏收的模块都会让程序
+    启动即被「缺失依赖」弹窗拦住（macOS 的 .app 内更是装不进去）。
+
     Returns:
         缺失的库列表 [(import名, pip安装名), ...]
     """
+    if _is_frozen():
+        return []
     missing = []
     for import_name, pip_name in REQUIRED_PACKAGES:
         try:

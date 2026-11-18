@@ -157,8 +157,40 @@ def main():
         QCheckBox::indicator:checked { background-color: #4fc3f7; border-color: #4fc3f7; }
         QCheckBox::indicator:hover { border-color: #4fc3f7; }
 
+        /* ── 数字输入框（周期/次数等）── */
+        /* 不写 QSpinBox::up-button/down-button：实测显式指定按钮底色后箭头会
+           整个消失（QSS 无图片时不会画三角），只给容器配色即可 —— 箭头沿用
+           原生绘制，在深色底上仍是浅色，可见。 */
+        QSpinBox, QDoubleSpinBox {
+            background-color: #2a2a3e;
+            color: #e0e0e0;
+            border: 1px solid #3a3a4e;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 13px;
+            selection-background-color: #1e3a5a;
+        }
+        QSpinBox:focus, QDoubleSpinBox:focus { border-color: #4fc3f7; }
+
+        /* ── 多行文本（原始报文数据编辑等）── */
+        QPlainTextEdit, QTextEdit {
+            background-color: #2a2a3e;
+            color: #e0e0e0;
+            border: 1px solid #3a3a4e;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 13px;
+            selection-background-color: #1e3a5a;
+        }
+        QPlainTextEdit:focus, QTextEdit:focus { border-color: #4fc3f7; }
+
         /* ── 标签颜色层级 ── */
         QLabel { color: #e0e0e0; }
+
+        /* ── 对话框（QInputDialog 等）── */
+        /* 全局 QLabel 已是浅色文字，若对话框沿用系统浅色底，「新建原始报文」
+           这类输入框的提示文字会变成浅灰压浅灰、几乎看不清，故必须一并压深。 */
+        QDialog { background-color: #1e1e2e; }
 
         /* ── 消息框 ── */
         QMessageBox { background-color: #1e1e2e; }

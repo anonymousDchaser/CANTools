@@ -1,0 +1,89 @@
+name: build-canmsgparser-macos
+
+# 为什么需要这个 workflow：PyInstaller 不支持交叉编译，macOS 的 .app / .dmg
+# 只能在 macOS 上生成。Windows 上只能产出 .exe 与 Setup.exe。
+#
+# 触发方式：手动 Run workflow。
+#
+# 有意不做标签触发：标签推送时 Release 往往还没建，action-gh-release 会抢先
+# 创建一个空说明的 Release，反而要人工收拾。现在的流程是
+#   1) 推标签 + 建 Windows Release
+#   2) gh workflow run build-canmsgparser-macos.yml
+#   3) gh run download ... && gh release upload <tag> ...
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write        # 附加到 Release 需要写权限
+
+defaults:
+  run:
+    working-directory: CanMsgParser
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    # Intel 机型的 runner 标签变动较频繁，标记为实验性：失败不阻塞 arm64 产物
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15          # Apple Silicon
+            arch: arm64
+            experimental: false
+          - runner: macos-15-intel    # Intel；标签名若变动只需改这里
+            arch: x86_64
+            experimental: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 与 README「macOS 环境搭建」建议保持一致：PyQt5 5.15.11 官方支持到
+          # 3.12，更保守的版本能避免 CI 因 wheel 缺失而失败。
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # uptime 只服务 Windows 的 PEAK(PCAN) 后端，macOS 上装了也用不到，
+          # 且该包在非 Windows 平台可能装不上，直接剔除避免阻断 CI。
+          grep -v -i '^uptime' requirements.txt > /tmp/req-mac.txt
+          pip install -r /tmp/req-mac.txt
+          pip install "pyinstaller>=6.10"
+
+      - name: 生成 app.icns
+        run: python tools/make_icns.py
+
+      - name: 冒烟测试（离屏实例化主窗口）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m tests.test_mainwindow_smoke
+          python tests/test_replay_widget.py
+          python tests/test_build_platform.py
+
+      - name: 打包 .app
+        env:
+          PYI_TARGET_ARCH: ${{ matrix.arch }}
+        run: python build.py
+
+      - name: 制作 dmg 与便携 zip
+        run: python build_installer.py
+
+      - name: 校验产物
+        run: |
+          ls -lh installer/output
+          test -n "$(ls installer/output/*.dmg)" || { echo "没有产出 dmg"; exit 1; }
+          hdiutil verify installer/output/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CanMsgParser-macos-${{ matrix.arch }}
+          path: |
+            CanMsgParser/installer/output/*.dmg
+            CanMsgParser/installer/output/*-portable.zip
+          if-no-files-found: error

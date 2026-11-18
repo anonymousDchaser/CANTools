@@ -15,7 +15,12 @@
 ;     {app}\_internal 导致「默认录制目录不可写」的问题（受限目录才会踩）。
 
 #define MyAppName "CanMsgParser"
-#define MyAppVersion "1.3.0"
+; 版本号默认值仅作兜底：正式打包由 build_installer.py 用
+;   ISCC.exe /DMyAppVersion=<version.py 里的 APP_VERSION> installer.iss
+; 覆盖，避免安装包与窗口标题两处版本各说各话。
+#ifndef MyAppVersion
+  #define MyAppVersion "1.4.0"
+#endif
 #define MyAppPublisher "lzxDChaser"
 #define MyAppExeName "CanMsgParser.exe"
 #define MySourceDir "..\dist\CanMsgParser"
@@ -47,6 +52,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 MinVersion=10.0
+; 让 Setup.exe 的文件属性里带上版本号（默认是 0.0.0.0，看起来像未标记的野包）；
+; VersionInfoVersion 要求 x.x.x.x 四段，这里补一个 .0。
+VersionInfoVersion={#MyAppVersion}.0
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} 安装程序
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

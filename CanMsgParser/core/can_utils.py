@@ -12,6 +12,7 @@
 """
 import importlib
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -19,8 +20,13 @@ import can
 import cantools
 
 
-# 默认 PCAN-USB 通道与波特率（与参考项目 VehicleTMasterProj 一致）
-DEFAULT_CHANNEL = "PCAN_USBBUS1"
+# 默认通道与波特率（Windows 沿用 PCAN-USB 约定）。
+# macOS / Linux 没有 PCAN 驱动，默认给「虚拟通道」——否则打包后第一次点连接
+# 必然失败，用户会以为是程序坏了。
+if sys.platform == "win32":
+    DEFAULT_CHANNEL = "PCAN_USBBUS1"
+else:
+    DEFAULT_CHANNEL = "virtual"
 DEFAULT_BITRATE = 500000
 
 # 支持的 CAN 设备类型 → python-can 后端映射。
@@ -88,7 +94,7 @@ class FrameEncodeGroup:
     signals: list = field(default_factory=list)  # list[SignalSlot]
 
 
-DEFAULT_INTERFACE_TYPE = "peak"
+DEFAULT_INTERFACE_TYPE = "peak" if sys.platform == "win32" else "virtual"
 
 
 def connect_bus(interface_type: str = DEFAULT_INTERFACE_TYPE,
