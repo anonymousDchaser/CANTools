@@ -147,6 +147,10 @@ class RealtimeMonitorWidget(QWidget):
             # 监控进行中加入信号：同步进采集与曲线（曲线/采集各自去重）
             self._sync_monitor_signals()
 
+    def clear_selected_signals(self):
+        """清空已选信号（供「替换」模式分发使用：先清空再填入整组信号）。"""
+        self._clear_selected()
+
     def _refresh_sel_list(self):
         self._sel_list.blockSignals(True)
         self._sel_list.clear()

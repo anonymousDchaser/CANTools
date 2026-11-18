@@ -11,6 +11,12 @@
 - 组级「发送/停止」按钮控制单个报文组；顶部「开始/停止模拟上报」一键控制全部。
 - 信号行不再提供「单信号模拟」按钮（那正是覆盖问题的根源），操作列改为
   「移除该信号」；从组中移除最后一个信号时该报文组自动消失。
+- 支持【手工原始报文】：除按 DBC 编码的报文组外，可用「＋ 原始报文」新建一个
+  任意 ID 的报文组（如 0x112），逐字节编辑原始数据（长度优先按 DBC 识别，
+  识别不到默认 8 字节；下拉档位 8/16/32/64/128 字节），该组不经 DBC 编码，
+  直接把用户填写的字节原样发出。原始字节在组内「数据」子行里编辑，该行首列
+  跨列，可占满整行宽度显示完整字节串。⚠️ CAN FD 单帧上限 64 字节，128 档位
+  仅供本地编辑，发送时会被明确拦下。
 
 通道/波特率不再由本页设置，统一由「连接状态」页提供（set_connection）。
 """
@@ -18,9 +24,10 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QPushButton, QLabel,
     QMessageBox, QAbstractItemView, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QSpinBox, QCheckBox,
-    QLineEdit, QHeaderView, QComboBox, QTreeWidget, QTreeWidgetItem,
+    QLineEdit, QPlainTextEdit, QHeaderView, QComboBox, QTreeWidget,
+    QTreeWidgetItem, QInputDialog,
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
 import can
@@ -48,6 +55,91 @@ COL_STATUS = 5     # 状态 / 组状态
 COL_DETAIL = 6     # 详情 / —
 COL_ACTION = 7     # 操作（信号：移除 / 组：发送·停止）
 NUM_COLS = 8
+
+# 原始报文「数据长度」下拉的默认档位（按需求只列这五档）。
+# ⚠️ 128 字节不属于 CAN / CAN FD：ISO 11898-1 规定 FD 单帧最大 payload 为 64
+# 字节（128 已是 CAN XL 范畴）。该档位仅用于本地编辑/粘贴超长数据，真正上线
+# 时会被 _SimSendWorker._send_raw 拦下并给出明确提示，不会悄悄截断。
+RAW_DLC_CHOICES = (8, 16, 32, 64, 128)
+# CAN FD 单帧可发送的最大字节数（硬上限）
+CAN_FD_MAX_BYTES = 64
+# 合法 CAN / CAN FD 数据长度：下拉档位之外的长度（如经典帧 4 字节）不强行
+# 改成 8 —— DBC 识别或粘贴数据落到这些值时，临时补进下拉以免改变帧内容。
+LEGAL_DLC = (1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64)
+# 原始数据编辑的上限（= 下拉最大档位）：超过即拒绝解析
+MAX_RAW_BYTES = max(RAW_DLC_CHOICES)
+
+
+def _dlc_items_for(dlc: int) -> list[int]:
+    """下拉项：五个默认档位 + 当前长度（不在档位内时补进去，保持选中可见）。"""
+    items = list(RAW_DLC_CHOICES)
+    if dlc and dlc not in items:
+        items.append(dlc)
+        items.sort()
+    return items
+
+
+def _parse_hex_bytes(text: str) -> bytes | None:
+    """把用户输入解析为字节序列，失败返回 None。
+
+    接受三种书写方式（大小写、0x 前缀均可）：
+    - 空格/逗号分隔："00 11 22" / "0x00,0x11"
+    - 连续十六进制："001122"
+    - 混合："0011 22aa"
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return bytes()
+    # 去掉 0x/0X 前缀与常见分隔符（空格、逗号、制表符、连字符）
+    cleaned = raw.replace("0x", "").replace("0X", "")
+    for sep in (" ", ",", "\t", "-", "\n", "\r", "_"):
+        cleaned = cleaned.replace(sep, "")
+    if not cleaned:
+        return bytes()
+    if len(cleaned) % 2 != 0:
+        return None
+    try:
+        return bytes.fromhex(cleaned)
+    except ValueError:
+        return None
+
+
+def _hex_text(data: bytes) -> str:
+    """字节序列 -> 逐字节空格分隔的大写十六进制文本。"""
+    return " ".join(f"{b:02X}" for b in data)
+
+
+class _HexEditor(QPlainTextEdit):
+    """原始字节编辑器：多行 + 自动换行，一屏能看全 64 / 128 字节。
+
+    对外保持 QLineEdit 风格的 ``text()`` / ``setText()`` 与 ``editingFinished``
+    信号，使解析逻辑不必区分控件类型：
+    - ``textChanged`` 由使用方接「边输入边解析」的防抖逻辑；
+    - 失去焦点时发 ``editingFinished``（QPlainTextEdit 本身没有该信号）。
+    """
+
+    editingFinished = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self.setPlainText(text)
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        # Tab 交给焦点链（在多行编辑框里插入制表符没有意义）
+        self.setTabChangesFocus(True)
+        # 水平方向不滚动：靠自动换行显示完整字节串
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setFixedHeight(dp(54))
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def setText(self, text: str):
+        self.setPlainText(text)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.editingFinished.emit()
 
 
 def _signal_range(sig) -> tuple[int, int]:
@@ -110,6 +202,9 @@ class _SimSendWorker(QThread):
         self._lock = threading.Lock()
         self._values = {}   # {(msg_name, sig_name): raw}
         self._groups = {}   # {frame_id: {"keys": [...], "cycle": 秒, "enabled": bool}}
+        # {frame_id: {"data": bytes, "cycle": 秒, "enabled": bool}} —— 原始报文组，
+        # 不经 DBC 编码，直接按用户填写的字节发送
+        self._raw_groups = {}
         self._running = False
 
     # ── 以下由主线程调用，更新共享状态（锁保护） ──
@@ -140,6 +235,28 @@ class _SimSendWorker(QThread):
         with self._lock:
             self._groups.pop(frame_id, None)
 
+    # ── 原始报文组（不依赖 DBC） ──
+
+    def set_raw_group(self, frame_id: int, data: bytes, cycle_ms: int,
+                      enabled: bool):
+        """登记 / 更新一个原始报文组（发送线程按 data 原样发出）。"""
+        with self._lock:
+            self._raw_groups[frame_id] = {
+                "data": bytes(data),
+                "cycle": max(int(cycle_ms), 10) / 1000.0,
+                "enabled": enabled,
+            }
+
+    def set_raw_group_enabled(self, frame_id: int, enabled: bool):
+        with self._lock:
+            g = self._raw_groups.get(frame_id)
+            if g is not None:
+                g["enabled"] = enabled
+
+    def remove_raw_group(self, frame_id: int):
+        with self._lock:
+            self._raw_groups.pop(frame_id, None)
+
     def stop(self):
         self._running = False
 
@@ -155,21 +272,36 @@ class _SimSendWorker(QThread):
         self._running = True
 
     def run(self):
-        next_due = {}   # {frame_id: 下次到期时刻(time.monotonic)}
+        # 到期时刻按 (类型, frame_id) 记账：原始报文组与 DBC 信号组允许使用同一
+        # ID，若只用 frame_id 做键会互相顶掉对方的调度时刻。
+        next_due = {}   # {(kind, frame_id): 下次到期时刻(time.monotonic)}
         try:
             while self._running:
                 now = time.monotonic()
                 with self._lock:
                     dbc = self._dbc
                     values = dict(self._values)
-                    active = {fid: (list(g["keys"]), g["cycle"])
-                              for fid, g in self._groups.items() if g["enabled"]}
+                    active = {
+                        ("dbc", fid): (list(g["keys"]), g["cycle"])
+                        for fid, g in self._groups.items() if g["enabled"]
+                    }
+                    raw_active = {
+                        ("raw", fid): (g["data"], g["cycle"])
+                        for fid, g in self._raw_groups.items() if g["enabled"]
+                    }
                 wait = 0.05
-                for fid, (keys, cycle) in active.items():
-                    due = next_due.get(fid, 0.0)
+                for key, (keys, cycle) in active.items():
+                    due = next_due.get(key, 0.0)
                     if now >= due:
-                        self._send_one(dbc, fid, keys, values)
-                        next_due[fid] = now + cycle
+                        self._send_one(dbc, key[1], keys, values)
+                        next_due[key] = now + cycle
+                    else:
+                        wait = min(wait, max(0.001, due - now))
+                for key, (data, cycle) in raw_active.items():
+                    due = next_due.get(key, 0.0)
+                    if now >= due:
+                        self._send_raw(key[1], data)
+                        next_due[key] = now + cycle
                     else:
                         wait = min(wait, max(0.001, due - now))
                 # 睡眠上限 50ms：既由 next_due 保证各周期精度（最小 10ms），
@@ -200,6 +332,53 @@ class _SimSendWorker(QThread):
             bus.send(frame)
             # 发送侧主动 fan-out：PCAN 不回环自身发出的帧，收帧线程收不到，
             # 故在此投递，保证自己模拟的信号也能在监控页/报文页实时显示。
+            self._manager.dispatch(frame)
+            self.sent.emit(frame_id, " ".join(f"{b:02X}" for b in data))
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(frame_id, str(e))
+
+    def _send_raw(self, frame_id: int, data: bytes):
+        """线程内直接发送一帧原始报文（不经 DBC 编码）。
+
+        数据长度 > 8 时按 CAN FD 帧发送（is_fd=True）。两种前置拦截（都是
+        「明确报错」而不是丢给后端抛 ctypes 异常，那种错误信息用户看不懂）：
+        - 超过 CAN FD 上限 64 字节：物理上无法发送（下拉里的 128 档位仅供
+          本地编辑/粘贴），直接回报长度超限；
+        - 后端因长度不足抛异常（典型场景：连接层以经典 CAN 建链，> 8 字节
+          会在后端缓冲区赋值处溢出）：把原始异常包成可读说明再上报。这里不
+          按 bus.protocol 预判 CAN FD —— virtual 等后端同样报 CAN_20 却能
+          承载任意长度，预判会误伤离线测试。
+        """
+        if self._manager is None:
+            return
+        try:
+            bus = self._manager.get_bus()
+            if bus is None:
+                return
+            n = len(data)
+            if n > CAN_FD_MAX_BYTES:
+                self.error.emit(
+                    frame_id,
+                    f"数据长度 {n} 字节超过 CAN FD 上限 {CAN_FD_MAX_BYTES} 字节，"
+                    f"总线无法发送",
+                )
+                return
+            frame = can.Message(
+                arbitration_id=frame_id,
+                data=bytes(data),
+                is_extended_id=frame_id > 0x7FF,
+                is_fd=n > 8,
+            )
+            try:
+                bus.send(frame)
+            except Exception as e:  # noqa: BLE001
+                if n > 8:
+                    self.error.emit(
+                        frame_id,
+                        f"发送 {n} 字节帧失败（当前通道可能未启用 CAN FD）: {e}",
+                    )
+                    return
+                raise
             self._manager.dispatch(frame)
             self.sent.emit(frame_id, " ".join(f"{b:02X}" for b in data))
         except Exception as e:  # noqa: BLE001
@@ -237,6 +416,27 @@ class SignalSimWidget(QWidget):
         #   "send_btn": QPushButton,       # 组发送/停止按钮
         # }
         self._groups: dict = {}
+        # frame_id -> 原始报文组信息（不经 DBC 编码，直接发用户填写的字节）：
+        # {
+        #   "frame_id": int,
+        #   "msg_name": str,             # DBC 中同 ID 报文名（可空）
+        #   "dlc": int,                  # 当前数据长度
+        #   "data": bytes,               # 当前原始数据
+        #   "cycle": int,                # 组周期(ms)
+        #   "sending": bool,
+        #   "item": QTreeWidgetItem,     # 组行
+        #   "cycle_spin": QSpinBox,      # 组周期控件
+        #   "dlc_combo": QComboBox,      # 数据长度选择
+        #   "data_item": QTreeWidgetItem,# 组内「数据」子行（首列跨列）
+        #   "data_edit": _HexEditor,     # 原始数据（逐字节十六进制，多行自动换行）
+        #   "status_item": QTreeWidgetItem,  # 组状态单元（原始报文组无信号子行，
+        #                                    # 状态直接写在组行自身的状态列）
+        #   "send_btn": QPushButton,     # 发送/停止
+        #   "error": str,                # 最近一次数据校验错误（空串表示合法）
+        # }
+        # 与 _groups 分开存放：原始报文组没有 DBC 信号，不参与「所有信号」展开、
+        # 值快照与整帧编码等逻辑，混在一起会污染按信号组遍历的每一条路径。
+        self._raw_groups: dict = {}
         # 发送日志：frame_id -> 行号 / frame_id -> 已发送计数
         self._log_rows: dict = {}
         self._log_counts: dict = {}
@@ -245,6 +445,12 @@ class SignalSimWidget(QWidget):
         self._worker: _SimSendWorker | None = None
         # 最近一次值收集结果（发送出错时用于反推非法信号）
         self._last_values: dict = {}
+        # 原始数据编辑的防抖解析：边输入边解析，但不在半截十六进制时标红
+        self._raw_edit_timer = QTimer(self)
+        self._raw_edit_timer.setSingleShot(True)
+        self._raw_edit_timer.setInterval(350)
+        self._raw_edit_timer.timeout.connect(self._on_raw_edit_timeout)
+        self._raw_edit_pending: int | None = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -289,6 +495,18 @@ class SignalSimWidget(QWidget):
         self._status_label.setStyleSheet("color: #9090a0;")
         ctrl.addWidget(self._status_label)
         ctrl.addStretch()
+        # 新建原始报文组：不依赖 DBC，直接编辑并发送原始字节
+        self._raw_add_btn = QPushButton("＋ 原始报文")
+        self._raw_add_btn.setProperty("class", "compact")
+        self._raw_add_btn.setToolTip(
+            "新建一个手工原始报文组（如 0x112）：\n"
+            "数据长度优先按 DBC 中同 ID 报文自动识别，识别不到默认为 8 字节，\n"
+            "可在组行的「数据长度」下拉中改为 8 / 16 / 32 / 64 / 128 字节，\n"
+            "然后在展开的「数据」子行里逐字节编辑原始数据并发送。\n"
+            "注意：CAN FD 单帧上限 64 字节，128 字节只能本地编辑、无法发送。"
+        )
+        self._raw_add_btn.clicked.connect(self._on_add_raw_frame)
+        ctrl.addWidget(self._raw_add_btn)
         self._start_btn = QPushButton("开始模拟上报")
         self._start_btn.setProperty("class", "primary")
         self._start_btn.clicked.connect(self._on_start_stop)
@@ -316,7 +534,8 @@ class SignalSimWidget(QWidget):
         # 组行的「所有信号」勾选框也放在该列，宽度需容得下四字 + 指示器
         self._value_table.setColumnWidth(COL_MANUAL, dp(100))
         self._value_table.setColumnWidth(COL_DETAIL, 160)
-        self._value_table.setColumnWidth(COL_ACTION, dp(80))
+        # 原始报文组在该列放「发送/停止 + 删除」两个按钮，故留出双按钮宽度
+        self._value_table.setColumnWidth(COL_ACTION, dp(108))
         self._value_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._value_table.setAlternatingRowColors(True)
         # 行高：setItemWidget 放入的控件高度 = 行高 - 上下 padding。
@@ -393,8 +612,28 @@ class SignalSimWidget(QWidget):
             self._on_value_mode_changed(key)
 
     def add_selected_signals(self, signals: list):
-        """由「信号分组」窗分发按钮添加信号（去重，保留已输入数值）"""
-        new = [(m, s) for m, s in signals if (m, s) not in self._sel_signals]
+        """由「信号分组」窗分发按钮添加信号（去重，保留已输入数值）。
+
+        已在「原始报文」里手工创建的 ID 不接受其信号：同一 ID 若同时存在原始报文
+        组与信号报文组，两帧会按各自周期交错发出、互相覆盖，表现为「填的信号值
+        没生效」。这里跳过并提示，由用户决定删哪一侧。
+        """
+        blocked = []
+        allowed = []
+        for key in signals:
+            fid = self._frame_id_of(key[0])
+            if fid is not None and fid in self._raw_groups:
+                blocked.append(fid)
+                continue
+            allowed.append(key)
+        if blocked:
+            ids = "、".join(f"0x{f:03X}" for f in sorted(set(blocked)))
+            QMessageBox.information(
+                self, "提示",
+                f"以下 ID 已存在手工原始报文组，本次不添加其信号：\n{ids}\n"
+                f"如需按 DBC 信号模拟，请先删除对应的原始报文组（组行「✕」）。",
+            )
+        new = [(m, s) for m, s in allowed if (m, s) not in self._sel_signals]
         if not new:
             return
         for key in new:
@@ -591,6 +830,15 @@ class SignalSimWidget(QWidget):
                     manual_edit.setText("0")
             # 初始化手动值输入框可用状态（默认选枚举时禁用）
             self._on_value_mode_changed(key)
+        # 信号加入本页后默认展开所属报文组，用户可直接看到组内信号行
+        # （同一组只展开一次，避免逐行重复触发布局）
+        expanded = set()
+        for key in keys:
+            rd = self._row_data.get(key)
+            if rd is None or rd["frame_id"] in expanded:
+                continue
+            expanded.add(rd["frame_id"])
+            rd["grp_item"].setExpanded(True)
         self._refresh_group_summaries()
         self._refresh_sel_list()
         # 新增信号不改变发送状态（未开始发送），但确保按钮与实际状态一致
@@ -716,15 +964,481 @@ class SignalSimWidget(QWidget):
         self._remove_rows(keys)
         self._refresh_sel_list()
 
+    def clear_selected_signals(self):
+        """清空已选信号（供「替换」模式分发使用：先清空再填入整组信号）。
+
+        与「清空」按钮一致：只清除信号报文组，保留手工创建的原始报文组。
+        """
+        self._clear_selected()
+
     def _clear_selected(self):
+        """清空「已选信号」及其报文组；手工原始报文组不受影响。"""
         self._stop_all()
+        # 逐组销毁而不是 _value_table.clear()：后者会连原始报文组的行一起删掉，
+        # 而原始报文是用户手写的原始数据，不应被「清空已选信号」误删。
+        for fid in list(self._groups.keys()):
+            self._destroy_group(fid)
         self._sel_signals.clear()
         self._row_data.clear()
         self._groups.clear()
-        self._value_table.clear()
         self._refresh_sel_list()
+        self._refresh_send_button()
+
+    # ────────────────────── 原始报文组（手工）──────────────────────
+
+    def _on_add_raw_frame(self):
+        """「＋ 原始报文」按钮：输入帧 ID 后新建一个手工原始报文组。"""
+        text, ok = QInputDialog.getText(
+            self, "新建原始报文",
+            "帧 ID（十六进制，如 0x112 / 0x18FF50E5）:",
+        )
+        if not ok:
+            return
+        raw = (text or "").strip()
+        if not raw:
+            return
+        try:
+            frame_id = int(raw, 16)
+        except ValueError:
+            QMessageBox.warning(self, "帧 ID 无效", f"无法解析帧 ID: {raw}")
+            return
+        if not 0 <= frame_id <= 0x1FFFFFFF:
+            QMessageBox.warning(
+                self, "帧 ID 无效", "帧 ID 必须在 0x0 ~ 0x1FFFFFFF 之间"
+            )
+            return
+        if frame_id in self._raw_groups:
+            QMessageBox.information(
+                self, "提示", f"原始报文 0x{frame_id:03X} 已存在"
+            )
+            return
+        if frame_id in self._groups:
+            QMessageBox.information(
+                self, "提示",
+                f"0x{frame_id:03X} 已存在按 DBC 分组的信号报文组，\n"
+                f"请先移除该报文组后再新建原始报文（同一 ID 不能同时存在两类组）。",
+            )
+            return
+        self._create_raw_group(frame_id)
+        self._refresh_send_button()
+
+    def _detect_dlc(self, frame_id: int) -> tuple[int, str]:
+        """识别该 ID 的数据长度：优先 DBC（cantools），其次已加载的报文定义。
+
+        返回 (dlc, 报文名)。识别不到时报文名为空、长度回落为 8 字节，由用户
+        在下拉框中手动选择（默认档位 8/16/32/64/128）。识别到的长度只要是
+        合法 CAN 长度（如经典帧 4 字节）就原样保留，不会被强行改成 8 —— 那会
+        直接改变要发送的帧内容。
+        """
+        if self._dbc is not None:
+            try:
+                msg = self._dbc.get_message_by_frame_id(frame_id)
+                length = getattr(msg, "length", None)
+                if isinstance(length, int) and length > 0:
+                    return length, getattr(msg, "name", "") or ""
+            except Exception:  # noqa: BLE001 — DBC 中无此 ID
+                pass
+        for m in self._messages:
+            if getattr(m, "frame_id", None) == frame_id:
+                dlc = getattr(m, "dlc", 0) or 0
+                if dlc > 0:
+                    return int(dlc), getattr(m, "name", "") or ""
+        return 8, ""
+
+    def _create_raw_group(self, frame_id: int):
+        """在报文表里创建一个原始报文组（ID 已校验，长度自动识别）。
+
+        组行只放周期 / 数据长度 / 状态 / 操作；原始数据编辑框放在组内子行，
+        并把该行首列设为跨列（setFirstColumnSpanned），从而占满整行宽度 ——
+        详情列只有 160px，64 字节要横向滚动才看得全。
+        """
+        dlc, msg_name = self._detect_dlc(frame_id)
+        # 识别到的长度可能不是合法 CAN 长度（异常 DBC），此时回落 8 字节
+        if dlc not in LEGAL_DLC:
+            dlc = 8
+        cycle = self._dbc_cycle_of(frame_id)
+
+        grp_item = QTreeWidgetItem(self._value_table)
+        title = f"📦 原始报文 0x{frame_id:03X}"
+        if msg_name:
+            title += f"  {msg_name}"
+        grp_item.setText(COL_SIG, title)
+        grp_item.setData(COL_SIG, Qt.UserRole, frame_id)
+        grp_item.setText(COL_FORMULA, f"原始数据（{dlc} 字节）")
+        grp_item.setToolTip(
+            COL_SIG,
+            "手工原始报文：数据不经 DBC 编码，按下方填写的字节原样发送。\n"
+            "长度优先按 DBC 中同 ID 报文自动识别，可在「数据长度」列手动修改。\n"
+            "原始字节在展开后的「数据」子行里编辑（跨整行显示）。",
+        )
+
+        cycle_spin = QSpinBox()
+        cycle_spin.setRange(10, 5000)
+        cycle_spin.setValue(cycle)
+        cycle_spin.setSuffix(" ms")
+        cycle_spin.valueChanged.connect(
+            lambda _v, f=frame_id: self._on_raw_cycle_changed(f)
+        )
+        self._value_table.setItemWidget(grp_item, COL_VALUE, cycle_spin)
+
+        dlc_combo = QComboBox()
+        self._refill_dlc_combo(dlc_combo, dlc)
+        dlc_combo.setToolTip(
+            "该报文的数据长度。\n"
+            "下拉档位：8 / 16 / 32 / 64 / 128 字节；粘贴或 DBC 识别到的其它"
+            "合法长度会临时补入本下拉。\n"
+            "注意：CAN FD 单帧上限为 64 字节，128 字节仅用于本地编辑，"
+            "无法上总线。"
+        )
+        dlc_combo.currentIndexChanged.connect(
+            lambda _i, f=frame_id: self._on_raw_dlc_changed(f)
+        )
+        self._value_table.setItemWidget(grp_item, COL_MANUAL, dlc_combo)
+
+        # 状态直接写在组行的状态列（原始报文组无信号子行，不必再挂状态子行）
+        grp_item.setText(COL_STATUS, "停止")
+        grp_item.setForeground(COL_STATUS, QColor("#888888"))
+
+        send_btn = QPushButton("发送")
+        send_btn.setFixedHeight(dp(20))
+        send_btn.setStyleSheet("QPushButton{padding:1px 4px;font-size:11px;}")
+        send_btn.clicked.connect(
+            lambda _c, f=frame_id: self._toggle_raw_group(f)
+        )
+        del_btn = QPushButton("✕")
+        del_btn.setFixedHeight(dp(20))
+        del_btn.setMaximumWidth(dp(26))
+        del_btn.setToolTip("删除该原始报文组")
+        del_btn.setStyleSheet("QPushButton{padding:1px 2px;font-size:11px;}")
+        del_btn.clicked.connect(
+            lambda _c, f=frame_id: self._remove_raw_group(f)
+        )
+        btn_box = QWidget()
+        btn_layout = QHBoxLayout(btn_box)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(dp(3))
+        btn_layout.addWidget(send_btn)
+        btn_layout.addWidget(del_btn)
+        self._value_table.setItemWidget(grp_item, COL_ACTION, btn_box)
+
+        # ── 组内「数据」子行：首列跨列，编辑框占满整行 ──
+        data_item = QTreeWidgetItem(grp_item)
+        data_item.setFirstColumnSpanned(True)
+        data_item.setSizeHint(COL_SIG, QSize(0, dp(58)))
+        data_edit = _HexEditor(_hex_text(bytes(dlc)))
+        data_edit.setPlaceholderText(
+            "逐字节十六进制，如 00 11 22 ...（支持 001122 / 0x00,0x11 写法）"
+        )
+        data_edit.setToolTip(
+            "直接编辑该报文的原始字节：支持“00 11 22”“001122”“0x00,0x11”写法。\n"
+            "输入长度与「数据长度」不一致时，若长度本身合法会自动切换长度；\n"
+            "编辑过程中不完整的输入不会被打红，失焦或开始发送时才做完整校验。"
+        )
+        data_edit.editingFinished.connect(
+            lambda f=frame_id: self._on_raw_data_edited(f)
+        )
+        # 边输入边解析（防抖）：只在不完整时保持静默，避免边打边标红
+        data_edit.textChanged.connect(
+            lambda f=frame_id: self._on_raw_edit_changed(f)
+        )
+        data_box = QWidget()
+        data_box_layout = QHBoxLayout(data_box)
+        data_box_layout.setContentsMargins(dp(2), dp(2), dp(2), dp(2))
+        data_box_layout.setSpacing(dp(6))
+        data_box_layout.addWidget(QLabel("数据:"))
+        data_box_layout.addWidget(data_edit, 1)
+        self._value_table.setItemWidget(data_item, COL_SIG, data_box)
+
+        self._raw_groups[frame_id] = {
+            "frame_id": frame_id,
+            "msg_name": msg_name,
+            "dlc": dlc,
+            "data": bytes(dlc),
+            "cycle": cycle,
+            "sending": False,
+            "item": grp_item,
+            "cycle_spin": cycle_spin,
+            "dlc_combo": dlc_combo,
+            "data_item": data_item,
+            "data_edit": data_edit,
+            "status_item": grp_item,
+            "send_btn": send_btn,
+            "error": "",
+        }
+        # 新建即可见：默认展开，用户能直接看到并编辑数据子行
+        grp_item.setExpanded(True)
+        self._status_label.setText(f"已新建原始报文 0x{frame_id:03X}（{dlc} 字节）")
+
+    @staticmethod
+    def _dlc_label(n: int) -> str:
+        return f"{n} 字节"
+
+    def _refill_dlc_combo(self, combo: QComboBox, dlc: int):
+        """按「默认档位 + 当前长度」重建下拉项，并选中 dlc（屏蔽信号）。"""
+        combo.blockSignals(True)
+        combo.clear()
+        for n in _dlc_items_for(dlc):
+            combo.addItem(self._dlc_label(n), n)
+        idx = combo.findData(dlc)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _set_hex_text(self, grp: dict, text: str):
+        """程序化回填编辑器文本（屏蔽 textChanged，避免再次触发解析）。"""
+        edit = grp["data_edit"]
+        edit.blockSignals(True)
+        edit.setText(text)
+        edit.blockSignals(False)
+
+    def _on_raw_edit_changed(self, frame_id: int):
+        """编辑中：启动防抖解析（只有完整且合法时才写入数据并同步发送线程）。"""
+        self._raw_edit_pending = frame_id
+        self._raw_edit_timer.start()
+
+    def _on_raw_edit_timeout(self):
+        """防抖到期：静默解析一次（不完整输入不标红，避免边打边闪红）。"""
+        frame_id = self._raw_edit_pending
+        self._raw_edit_pending = None
+        if frame_id is None:
+            return
+        self._on_raw_data_edited(frame_id, quiet=True)
+
+    def _set_raw_status(self, frame_id: int, text: str, color: str):
+        """设置原始报文组的状态文本与颜色。"""
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        grp["status_item"].setText(COL_STATUS, text)
+        grp["status_item"].setForeground(COL_STATUS, QColor(color))
+
+    def _refresh_raw_status(self, frame_id: int):
+        """按「长度是否超限 + 是否发送中」刷新状态列。
+
+        128 字节档位可选但发不出去：这里在状态列直接标「超限」，用户不必等到
+        点「发送」被弹窗拦下才知道。
+        """
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        n = len(grp["data"])
+        if n > CAN_FD_MAX_BYTES:
+            self._set_raw_status(frame_id, "超限", "#FFA500")
+            grp["item"].setToolTip(
+                COL_STATUS,
+                f"{n} 字节超过 CAN FD 单帧上限 {CAN_FD_MAX_BYTES} 字节，无法发送。\n"
+                f"请在「数据长度」中改为 64 字节及以下。",
+            )
+            return
+        grp["item"].setToolTip(COL_STATUS, "")
+        if grp["sending"]:
+            self._set_raw_status(frame_id, "发送中", "#44CC44")
+        else:
+            self._set_raw_status(frame_id, "停止", "#888888")
+
+    def _on_raw_cycle_changed(self, frame_id: int):
+        """原始报文组周期变化：同步到组并推送发送线程（运行中即时生效）。"""
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        grp["cycle"] = grp["cycle_spin"].value()
+        self._sync_raw_group_to_worker(frame_id)
+
+    def _on_raw_dlc_changed(self, frame_id: int):
+        """数据长度下拉变化：裁剪/补零当前数据以匹配新长度。"""
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        dlc = grp["dlc_combo"].currentData()
+        try:
+            dlc = int(dlc)
+        except (TypeError, ValueError):
+            return
+        old = grp["data"]
+        if len(old) < dlc:
+            new_data = old + bytes(dlc - len(old))
+        else:
+            new_data = old[:dlc]
+        grp["dlc"] = dlc
+        grp["data"] = new_data
+        grp["error"] = ""
+        self._set_hex_text(grp, _hex_text(new_data))
+        grp["item"].setText(COL_FORMULA, f"原始数据（{dlc} 字节）")
+        self._refresh_raw_status(frame_id)
+        self._sync_raw_group_to_worker(frame_id)
+
+    def _on_raw_data_edited(self, frame_id: int, quiet: bool = False) -> bool:
+        """解析原始数据输入框并写回组数据；返回数据是否合法。
+
+        - 内容非法 / 长度非法（非合法 CAN、CAN FD 长度）时置红并不改数据；
+        - 长度变化且本身合法时，自动同步「数据长度」下拉，避免用户还要再点一次；
+        - quiet=True（编辑过程中的防抖解析）：非法输入**不标红、不改状态**，
+          因为用户可能才敲了一半；失焦或开始发送时会再走一次严格校验。
+        """
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return False
+        text = grp["data_edit"].text()
+        data = _parse_hex_bytes(text)
+        if data is None:
+            grp["error"] = "非法的十六进制数据"
+        elif not data:
+            grp["error"] = "原始数据不能为空"
+        elif len(data) > MAX_RAW_BYTES:
+            grp["error"] = (
+                f"数据长度 {len(data)} 字节超过上限 {MAX_RAW_BYTES} 字节"
+            )
+        elif len(data) != grp["dlc"]:
+            if len(data) in LEGAL_DLC:
+                grp["dlc"] = len(data)
+                combo = grp["dlc_combo"]
+                # 长度不在默认档位内（如经典帧 4 字节）：先补进下拉再选中，
+                # 否则 setCurrentIndex(findData(...)) 会落到 -1 导致下拉空白
+                if combo.findData(len(data)) < 0:
+                    self._refill_dlc_combo(combo, len(data))
+                combo.blockSignals(True)
+                combo.setCurrentIndex(combo.findData(len(data)))
+                combo.blockSignals(False)
+                grp["item"].setText(
+                    COL_FORMULA, f"原始数据（{len(data)} 字节）"
+                )
+                grp["error"] = ""
+            else:
+                grp["error"] = (
+                    f"数据长度 {len(data)} 字节不是合法 CAN/CAN FD 长度"
+                    f"（可选: {', '.join(str(n) for n in LEGAL_DLC)}）"
+                )
+        else:
+            grp["error"] = ""
+
+        if grp["error"]:
+            if quiet:
+                # 编辑中：保留上一次合法数据与状态，不刷红也不弹提示
+                return False
+            grp["status_item"].setText(COL_STATUS, "错误")
+            grp["status_item"].setForeground(COL_STATUS, QColor("#FF4444"))
+            grp["item"].setToolTip(COL_STATUS, grp["error"])
+            return False
+
+        grp["data"] = data
+        # 规范化显示（统一大写、逐字节空格分隔）。屏蔽 textChanged 后再回填，
+        # 否则会再次触发防抖解析（虽能收敛，但白白多跑一轮）。
+        normalized = _hex_text(data)
+        if text != normalized:
+            self._set_hex_text(grp, normalized)
+        grp["item"].setToolTip(COL_STATUS, "")
+        self._refresh_raw_status(frame_id)
+        self._sync_raw_group_to_worker(frame_id)
+        return True
+
+    def _sync_raw_group_to_worker(self, frame_id: int):
+        """把原始报文组的数据/周期/启停状态推送到发送线程。
+
+        超限长度（> 64 字节）不上总线：这里显式把 enable 置 False，否则发送
+        线程会按周期反复尝试、每帧刷一次错。
+        """
+        if self._worker is None:
+            return
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        sendable = len(grp["data"]) <= CAN_FD_MAX_BYTES
+        self._worker.set_raw_group(
+            frame_id, grp["data"], grp["cycle"], grp["sending"] and sendable
+        )
+
+    def _toggle_raw_group(self, frame_id: int):
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        if grp["sending"]:
+            self._stop_raw_group(frame_id)
+        else:
+            self._start_raw_group(frame_id)
+
+    def _start_raw_group(self, frame_id: int):
+        """启动单个原始报文组的周期发送（不依赖 DBC）。"""
+        grp = self._raw_groups.get(frame_id)
+        if grp is None or grp["sending"]:
+            return
+        # 输入框可能还有未提交的改动（未失焦）：先按当前文本重新解析
+        if not self._on_raw_data_edited(frame_id):
+            QMessageBox.warning(
+                self, "提示",
+                f"0x{frame_id:03X} 的原始数据无效：{grp['error']}",
+            )
+            return
+        # 128 字节档位只允许本地编辑：CAN FD 单帧上限 64 字节，发送前拦下
+        if len(grp["data"]) > CAN_FD_MAX_BYTES:
+            QMessageBox.warning(
+                self, "无法发送",
+                f"0x{frame_id:03X} 的数据长度为 {len(grp['data'])} 字节，超过 "
+                f"CAN FD 单帧上限 {CAN_FD_MAX_BYTES} 字节。\n"
+                f"请在「数据长度」中改为 64 字节及以下，或缩短原始数据。",
+            )
+            return
+        if not self._ensure_bus():
+            return
+        worker = self._ensure_worker()
+        grp["sending"] = True
+        worker.set_raw_group(frame_id, grp["data"], grp["cycle"], True)
+        self._set_raw_status(frame_id, "发送中", "#44CC44")
+        grp["send_btn"].setText("停止")
+        self._refresh_send_button()
+        self._status_label.setText(self._sending_summary())
+
+    def _stop_raw_group(self, frame_id: int):
+        """停止单个原始报文组的周期发送。"""
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        grp["sending"] = False
+        if self._worker is not None:
+            self._worker.set_raw_group_enabled(frame_id, False)
+        self._set_raw_status(frame_id, "停止", "#888888")
+        grp["send_btn"].setText("发送")
+        self._refresh_send_button()
+        if not self._any_sending():
+            self._stop_worker()
+            self._status_label.setText("已停止")
+
+    def _remove_raw_group(self, frame_id: int):
+        """删除原始报文组（需确认：数据为用户手工填写，删除不可撤销）。"""
+        grp = self._raw_groups.get(frame_id)
+        if grp is None:
+            return
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定删除原始报文组 0x{frame_id:03X} 及其原始数据吗？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        grp["sending"] = False
+        if self._worker is not None:
+            self._worker.remove_raw_group(frame_id)
+        idx = self._value_table.indexOfTopLevelItem(grp["item"])
+        if idx >= 0:
+            self._value_table.takeTopLevelItem(idx)
+        self._raw_groups.pop(frame_id, None)
+        self._refresh_send_button()
+        if not self._any_sending():
+            self._stop_worker()
+            self._status_label.setText("已停止")
 
     # ────────────────────── 值解析与发送 ──────────────────────
+
+    def _any_sending(self) -> bool:
+        """是否存在正在发送的报文组（信号组或原始报文组）。"""
+        return any(g["sending"] for g in self._groups.values()) or any(
+            g["sending"] for g in self._raw_groups.values()
+        )
+
+    def _sending_summary(self) -> str:
+        """状态栏文案：信号数 / 报文组数 / 原始报文组数。"""
+        parts = [f"{len(self._sel_signals)} 信号", f"{len(self._groups)} 报文组"]
+        if self._raw_groups:
+            parts.append(f"{len(self._raw_groups)} 原始报文")
+        return "模拟上报中: " + " / ".join(parts)
 
     def _on_value_mode_changed(self, key: tuple):
         """下拉框在「枚举 / 手动模拟」间切换时，启用/禁用手动值输入框。
@@ -1056,10 +1770,8 @@ class SignalSimWidget(QWidget):
         return grp is not None and grp["sending"]
 
     def _on_start_stop(self):
-        # 全局发送中，或任一报文组正在发送，都视为「正在模拟」
-        sending_any = self._sending or any(
-            g["sending"] for g in self._groups.values()
-        )
+        # 全局发送中，或任一报文组（含原始报文组）正在发送，都视为「正在模拟」
+        sending_any = self._sending or self._any_sending()
         if sending_any:
             self._stop_all()
         else:
@@ -1076,16 +1788,20 @@ class SignalSimWidget(QWidget):
         _ensure_bus 重新取用；若在此清空，会误伤「添加信号（尚未发送）」等
         仅刷新按钮的调用路径（见回归测试 test_signal_sim_group）。
         """
-        sending_any = any(g["sending"] for g in self._groups.values())
+        sending_any = self._any_sending()
         self._sending = sending_any
         self._start_btn.setText("停止模拟上报" if sending_any else "开始模拟上报")
 
     def _start_all(self):
-        if not self._dbc_path or self._dbc is None:
+        # 原始报文组不依赖 DBC：只有存在按 DBC 分组的信号报文组时才强制要求 DBC
+        if self._groups and (not self._dbc_path or self._dbc is None):
             QMessageBox.warning(self, "提示", "请先加载 DBC 文件")
             return
-        if not self._sel_signals:
-            QMessageBox.warning(self, "提示", "请先通过「信号分组」窗添加要上报的信号")
+        if not self._sel_signals and not self._raw_groups:
+            QMessageBox.warning(
+                self, "提示",
+                "请先通过「信号分组」窗添加要上报的信号，或新建原始报文",
+            )
             return
         if not self._ensure_bus():
             return
@@ -1097,14 +1813,16 @@ class SignalSimWidget(QWidget):
 
         for fid in list(self._groups.keys()):
             self._start_group(fid)
+        for fid in list(self._raw_groups.keys()):
+            self._start_raw_group(fid)
         self._refresh_send_button()
-        self._status_label.setText(
-            f"模拟上报中: {len(self._sel_signals)} 信号 / {len(self._groups)} 报文组"
-        )
+        self._status_label.setText(self._sending_summary())
 
     def _stop_all(self):
         for fid in list(self._groups.keys()):
             self._stop_group(fid)
+        for fid in list(self._raw_groups.keys()):
+            self._stop_raw_group(fid)
         self._stop_worker()
         self._refresh_send_button()
         self._status_label.setText("已停止")
@@ -1147,9 +1865,7 @@ class SignalSimWidget(QWidget):
                 rd["status_item"].setForeground(COL_STATUS, QColor("#44CC44"))
         # 同步全局按钮状态：只要任一报文组在发送，顶部即显示「停止模拟上报」
         self._refresh_send_button()
-        self._status_label.setText(
-            f"模拟上报中: {len(self._sel_signals)} 信号 / {len(self._groups)} 报文组"
-        )
+        self._status_label.setText(self._sending_summary())
 
     def _stop_group(self, frame_id: int):
         """停止单个报文组的周期发送（释放本地总线引用由全局 _stop_all 负责）。"""
@@ -1170,9 +1886,9 @@ class SignalSimWidget(QWidget):
         # 若没有任何报文组在发送，复位全局按钮状态（_refresh_send_button 会在
         # 「无发送」时释放本地总线引用并复位按钮文案）
         self._refresh_send_button()
-        if not any(g["sending"] for g in self._groups.values()):
-            # 所有组都已停止：顺带停掉发送线程——既避免线程无任务空转，也避免
-            # 进程退出时 QThread 仍在运行被销毁而崩溃。
+        if not self._any_sending():
+            # 所有组（含原始报文组）都已停止：顺带停掉发送线程——既避免线程
+            # 无任务空转，也避免进程退出时 QThread 仍在运行被销毁而崩溃。
             self._stop_worker()
             self._status_label.setText("已停止")
 
@@ -1197,6 +1913,13 @@ class SignalSimWidget(QWidget):
         仅标注该报文组的信号行，不弹窗、不中断上报——避免总线瞬时异常把整轮
         模拟打断；错误详情通过状态栏与行内标红呈现。
         """
+        # 原始报文组：没有信号行可标，直接把组状态置为「错误」
+        if frame_id not in self._groups and frame_id in self._raw_groups:
+            self._set_raw_status(frame_id, "错误", "#FF4444")
+            grp_item = self._raw_groups[frame_id]["item"]
+            grp_item.setToolTip(COL_STATUS, err_msg)
+            self._status_label.setText(f"发送失败: {err_msg}")
+            return
         grp = self._groups.get(frame_id)
         keys = list(grp["keys"]) if grp is not None else []
         msg = None

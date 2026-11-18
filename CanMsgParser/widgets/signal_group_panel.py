@@ -51,6 +51,8 @@ class SignalGroupPanel(QWidget):
     config_saved = pyqtSignal(str)
     # 分发信号到曲线图/实时监控/模拟上报页：(target, [(msg_name, sig_name), ...])
     dispatch_requested = pyqtSignal(str, list)
+    # 勾选「替换」时的分发：目标页先清空已选信号，再填入整个分组的信号
+    replace_dispatch_requested = pyqtSignal(str, list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -170,9 +172,12 @@ class SignalGroupPanel(QWidget):
         group_dispatch_bar = QHBoxLayout()
         group_dispatch_bar.setSpacing(dp(4))
         for _target, _label, _tip in (
-            ("curve", "曲线图", "将分组中已勾选的信号添加到曲线图"),
-            ("monitor", "实时监控", "将分组中已勾选的信号添加到实时监控"),
-            ("sim", "模拟上报", "将分组中已勾选的信号添加到模拟上报"),
+            ("curve", "曲线图",
+             "分发到曲线图：默认追加已勾选信号；勾选「替换」则为整组替换"),
+            ("monitor", "实时监控",
+             "分发到实时监控：默认追加已勾选信号；勾选「替换」则为整组替换"),
+            ("sim", "模拟上报",
+             "分发到模拟上报：默认追加已勾选信号；勾选「替换」则为整组替换"),
         ):
             _btn = QPushButton(_label)
             _btn.setProperty("class", "compact")
@@ -181,6 +186,15 @@ class SignalGroupPanel(QWidget):
                 lambda _checked=False, t=_target: self._on_group_dispatch(t)
             )
             group_dispatch_bar.addWidget(_btn)
+
+        # 「替换」开关：勾选后上述三个按钮不再追加，而是用整个分组覆盖目标页
+        self._replace_chk = QCheckBox("替换")
+        self._replace_chk.setToolTip(
+            "勾选：点击左侧三个按钮时，先用当前分组的【全部信号】清空并替换目标页\n"
+            "已选信号（忽略分组内的勾选状态，相当于清空后把整组填进去）；\n"
+            "取消（默认）：只把分组中已勾选的信号【追加】到目标页。"
+        )
+        group_dispatch_bar.addWidget(self._replace_chk)
         group_dispatch_bar.addStretch()
         layout.addLayout(group_dispatch_bar)
 
@@ -272,10 +286,44 @@ class SignalGroupPanel(QWidget):
                     result.append((cs.msg_name, cs.sig_name))
         return result
 
+    def get_current_group_signals(self) -> list[tuple[str, str]]:
+        """返回当前分组的【全部】信号（分组内顺序），供「替换」模式分发。
+
+        只保留当前 DBC 能匹配到的信号：分组配置可能来自其它 DBC，未匹配信号在
+        目标页无法解码 / 发送，直接分发只会产生无效条目与报错。DBC 未加载时
+        `_dbc_lookup` 为空，此时返回空列表（由调用方提示用户先加载 DBC）。
+        """
+        if not 0 <= self._current_group_idx < len(self._groups):
+            return []
+        lookup = getattr(self, "_dbc_lookup", {})
+        return [
+            (s.msg_name, s.sig_name)
+            for s in self._groups[self._current_group_idx].signals
+            if (s.msg_name, s.sig_name) in lookup
+        ]
+
     # ────────────────────── 分发 / 添加 ──────────────────────
 
     def _on_group_dispatch(self, target: str):
-        """把分组中已勾选的信号分发到指定目标页"""
+        """把分组信号分发到指定目标页。
+
+        两种模式由「替换」复选框决定：
+        - 未勾选（默认）：只分发分组中【已勾选】的信号，追加到目标页；
+        - 已勾选：忽略勾选状态，用当前分组的【全部信号】替换目标页
+          （主窗口收到 replace_dispatch_requested 后先清空目标页再填入）。
+        """
+        if self._replace_chk.isChecked():
+            signals = self.get_current_group_signals()
+            if not signals:
+                QMessageBox.information(
+                    self, "提示",
+                    "当前分组没有可用信号：请确认已加载对应 DBC，"
+                    "且分组中包含该 DBC 的信号",
+                )
+                return
+            self.replace_dispatch_requested.emit(target, signals)
+            return
+
         checked = self.get_checked_signals()
         if not checked:
             QMessageBox.information(self, "提示", "请先在分组中勾选要发送的信号")

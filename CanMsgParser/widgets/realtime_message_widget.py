@@ -8,6 +8,7 @@
   比弹窗更直观，无需额外对话框。
 """
 import os
+import sys
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -327,6 +328,16 @@ class RealtimeMessageWidget(QWidget):
     # ─────────────── 录制控制 ───────────────
 
     def _process_dir(self) -> str:
+        """录制文件默认目录。
+
+        - Windows：进程同级目录（历史行为；安装包装在 %LOCALAPPDATA% 下可写）。
+        - macOS：``.app`` 包内是只读的，向包内写文件既会失败也会破坏代码签名，
+          因此落到用户「文稿/CanMsgParser」。开发态（未打包）仍用源码目录便于调试。
+        """
+        if sys.platform == "darwin" and getattr(sys, "frozen", False):
+            return os.path.join(
+                os.path.expanduser("~"), "Documents", "CanMsgParser"
+            )
         # 进程同级目录（开发态为 CanMsgParser 目录）
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

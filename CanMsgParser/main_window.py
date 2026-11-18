@@ -35,6 +35,7 @@ from utils.export_utils import export_chart_image, export_signal_data
 from utils.excel_value_loader import load_signal_value_db, load_value_descriptions
 from utils.font_helper import UI_FONT_FAMILY
 from utils.ui_scale import dp, scale_qss
+from version import APP_VERSION
 
 # 配置文件路径，用于记住上次加载的 DBC 文件
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".canmsgparser_config.json")
@@ -250,6 +251,44 @@ class MainWindow(QMainWindow):
             color: #666680;
         }
 
+        /* ── 数字输入框（周期/次数等）── */
+        /* 不写 QSpinBox::up-button/down-button：实测显式指定按钮底色后箭头会
+           整个消失（QSS 无图片时不会画三角），只给容器配色即可 —— 箭头沿用
+           原生绘制，在深色底上仍是浅色，可见。 */
+        QSpinBox, QDoubleSpinBox {
+            background-color: #2a2a3e;
+            color: #e0e0e0;
+            border: 1px solid #3a3a4e;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 13px;
+            selection-background-color: #1e3a5a;
+        }
+        QSpinBox:focus, QDoubleSpinBox:focus {
+            border-color: #4fc3f7;
+        }
+
+        /* ── 多行文本（原始报文数据编辑等）── */
+        QPlainTextEdit, QTextEdit {
+            background-color: #2a2a3e;
+            color: #e0e0e0;
+            border: 1px solid #3a3a4e;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 13px;
+            selection-background-color: #1e3a5a;
+        }
+        QPlainTextEdit:focus, QTextEdit:focus {
+            border-color: #4fc3f7;
+        }
+
+        /* ── 对话框（QInputDialog 等）── */
+        /* 全局 QLabel 是浅色文字，对话框若沿用系统浅色底，提示文字会变成
+           浅灰压浅灰、几乎看不清，故一并压深。 */
+        QDialog {
+            background-color: #1e1e2e;
+        }
+
         /* ── 复选框（信号分组 / 信号检索视图等）── */
         QCheckBox {
             background-color: transparent;
@@ -362,7 +401,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # 进程内共享的 CAN 连接管理器：模拟上报/实时监控/实时报文三页共用
         self._conn_manager = CanConnectionManager(self)
-        self.setWindowTitle("CAN 报文分析工具 v1.3.0")
+        self.setWindowTitle(f"CAN 报文分析工具 v{APP_VERSION}")
 
         # ── 窗口尺寸自适应可用屏幕 ──
         # 原实现固定 1920x1280：在 1080p 及以下屏幕上超出屏幕被系统裁切，最小
@@ -637,6 +676,9 @@ class MainWindow(QMainWindow):
         self._monitor_widget.set_connection_manager(self._conn_manager)
         self._realtime_msg_widget.set_connection_manager(self._conn_manager)
         self._replay_widget.set_connection_manager(self._conn_manager)
+        # 拖到回放页的 .blf/.asc 同时作为待分析报文载入分析页
+        # （.log/.csv 分析页不支持，只在回放页使用）
+        self._replay_widget.file_dropped.connect(self._load_log_file)
 
         # 连接状态页信号接线
         self._conn_widget.dbc_load_requested.connect(self._load_dbc)
@@ -662,6 +704,9 @@ class MainWindow(QMainWindow):
         self._group_panel = SignalGroupPanel()
         self._group_panel.config_saved.connect(self._on_group_config_saved)
         self._group_panel.dispatch_requested.connect(self._on_dispatch)
+        self._group_panel.replace_dispatch_requested.connect(
+            self._on_replace_dispatch
+        )
         self._group_dock = QDockWidget("信号分组", self)
         self._group_dock.setWidget(self._group_panel)
         self._group_dock.setFeatures(
@@ -843,6 +888,14 @@ class MainWindow(QMainWindow):
     def _load_log_file(self, path: str):
         """异步加载指定路径的日志文件（可被拖放复用）"""
         self._conn_widget.set_log_path(path)
+        # 同一份日志同时注入回放页，使「拖进应用」的报文既成为待分析报文，
+        # 也成为可回放报文；用户仍可在回放页用「选择文件」另选一份覆盖。
+        # 回放页内部按路径去重，重复调用不会二次解析（拖到回放页时事件
+        # 会回调到这里，而回放页已自行加载过一次）。
+        try:
+            self._replay_widget.load_file(path)
+        except Exception:  # noqa: BLE001 — 回放页异常不应阻断分析页加载
+            pass
         # 清空旧数据和缓存
         self._cache.clear()
         self._decoded_signals.clear()
@@ -898,6 +951,37 @@ class MainWindow(QMainWindow):
         elif target == "sim":
             self._sim_widget.add_selected_signals(signals)
             self._tabs.setCurrentIndex(3)  # 跳转到模拟上报
+
+    def _on_replace_dispatch(self, target: str, signals: list):
+        """「替换」模式分发：先用整组信号清空目标页已选信号，再填入该组信号。
+
+        与 _on_dispatch 的区别仅在目标页是否先清空：replace 语义要求目标页的
+        已选信号被整组信号「替换」掉，而不是追加，避免多次分发后残留旧信号。
+        """
+        if target == "curve":
+            # 清空已选列表 + 眼睛隐藏状态，并丢弃旧的解码结果：
+            # 否则拖动排序 / 切显隐时 _replot_by_curve_order 会用陈旧缓存
+            # 把已不在列表里的信号重新画回来。
+            self._curve_signals.clear()
+            self._curve_hidden.clear()
+            self._decoded_signals.clear()
+            self._refresh_curve_list()
+            self._sync_curve_visibility()
+            # 顺带清掉画布上的旧曲线：只清列表会让「旧曲线还在、列表已换」看起来
+            # 像替换没生效；新曲线仍由用户点「绘制」触发（与原交互一致）。
+            plot = getattr(self, "_plot_widget", None)
+            if plot is not None:
+                plot.plot_signals([])
+            self._add_curve_signals(signals)
+            self._tabs.setCurrentIndex(1)
+        elif target == "monitor":
+            self._monitor_widget.clear_selected_signals()
+            self._monitor_widget.add_selected_signals(signals)
+            self._tabs.setCurrentIndex(4)
+        elif target == "sim":
+            self._sim_widget.clear_selected_signals()
+            self._sim_widget.add_selected_signals(signals)
+            self._tabs.setCurrentIndex(3)
 
     def _add_curve_signals(self, signals: list):
         """把分发的信号按加入顺序追加到曲线图已选列表（去重）；
@@ -1048,6 +1132,7 @@ class MainWindow(QMainWindow):
         self._monitor_widget.set_connection(interface_type, channel, bitrate)
         self._sim_widget.set_connection(interface_type, channel, bitrate)
         self._realtime_msg_widget.set_connection(interface_type, channel, bitrate)
+        self._replay_widget.set_connection(interface_type, channel, bitrate)
         if not connected:
             # 停止三页的收/发，避免共享总线被关闭时仍有线程在用
             try:
@@ -1284,9 +1369,9 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         """显示关于对话框"""
-        about_text = """
+        about_text = f"""
         <h2>CAN 报文分析工具</h2>
-        <p><b>版本:</b> 1.3.0</p>
+        <p><b>版本:</b> {APP_VERSION}</p>
         <p><b>作者:</b> laizhenxin</p>
         <p><b>邮箱:</b> lzxDchaser@126.com</p>
         <hr>
