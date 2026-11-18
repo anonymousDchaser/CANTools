@@ -48,3 +48,6 @@ AppIcon.iconset/
 # 虚拟环境（macOS 用户按 README 在 .venv 中安装依赖）
 .venv/
 venv/
+
+# 发布产物汇总（`gh run download` 与构建Output 的临时目录）
+.release/
