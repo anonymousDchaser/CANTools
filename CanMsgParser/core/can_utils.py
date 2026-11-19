@@ -29,6 +29,53 @@ else:
     DEFAULT_CHANNEL = "virtual"
 DEFAULT_BITRATE = 500000
 
+# CAN FD 数据段波特率（仲裁段仍用 bitrate）。默认关闭，保持与经典 CAN 兼容。
+DEFAULT_DATA_BITRATE = 2000000
+FD_DATA_BITRATES = (1000000, 2000000, 4000000, 5000000, 8000000)
+
+# CAN FD 是总线级属性：连接页勾选后写在这里，各功能页（模拟上报 / 实时监控 /
+# 实时报文 / 回放）自行建链时自动带上，无需逐层加参数。
+_fd_mode = {"enabled": False, "data_bitrate": DEFAULT_DATA_BITRATE}
+
+
+def set_fd_mode(enabled: bool, data_bitrate=None):
+    """设置全局 CAN FD 开关（由「连接状态」页调用）。"""
+    _fd_mode["enabled"] = bool(enabled)
+    if data_bitrate:
+        try:
+            _fd_mode["data_bitrate"] = int(data_bitrate)
+        except (TypeError, ValueError):
+            pass
+
+
+def get_fd_mode():
+    """返回 (是否启用 CAN FD, 数据段波特率)。"""
+    return _fd_mode["enabled"], _fd_mode["data_bitrate"]
+
+
+def _build_fd_kwargs(pycan: str, bitrate: int, data_bitrate: int) -> dict:
+    """按后端能力组装 CAN FD 建链参数。
+
+    - vector：直接支持 fd + data_bitrate；
+    - virtual：没有 fd 参数，用 protocol 标记为 CAN FD（便于 is_fd 帧通过校验）；
+    - pcan 及未知后端：只认 fd + 位定时，需要给出 BitTimingFd。
+      典型 PEAK 设备时钟 80MHz，按 80% 采样点计算；算不出时抛 RuntimeError
+      （宁可明确报错，也不要带错误定时上总线）。
+    """
+    if pycan == "vector":
+        return {"fd": True, "data_bitrate": data_bitrate}
+    if pycan == "virtual":
+        return {"protocol": can.CanProtocol.CAN_FD}
+    try:
+        timing = can.BitTimingFd.from_sample_point(
+            80_000_000, int(bitrate), 80.0, int(data_bitrate), 80.0,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"无法为 {bitrate} / {data_bitrate} 计算 CAN FD 位定时: {e}"
+        ) from e
+    return {"fd": True, "timing": timing}
+
 # 支持的 CAN 设备类型 → python-can 后端映射。
 # pycan: python-can 的 interface 名；channels: 该类型可选通道列表；
 # needs:  该类型正常工作所需的驱动/依赖提示（用于 UI 与错误提示）。
@@ -99,13 +146,16 @@ DEFAULT_INTERFACE_TYPE = "peak" if sys.platform == "win32" else "virtual"
 
 def connect_bus(interface_type: str = DEFAULT_INTERFACE_TYPE,
                 channel: str = DEFAULT_CHANNEL,
-                bitrate: int = DEFAULT_BITRATE):
+                bitrate: int = DEFAULT_BITRATE,
+                fd=None, data_bitrate=None):
     """按设备类型连接 CAN 硬件总线。
 
     Args:
         interface_type: DEVICE_TYPES 中的键（tosun/peak/vector/virtual）。
         channel:        通道标识（不同设备类型格式不同）。
-        bitrate:        波特率。
+        bitrate:        仲裁段波特率。
+        fd:             是否以 CAN FD 建链；None 表示读取全局开关（连接页勾选）。
+        data_bitrate:   数据段波特率；None 表示读取全局设置。
 
     Returns:
         (bus, None) 成功； (None, error_msg) 失败，error_msg 已带设备类型与
@@ -126,9 +176,22 @@ def connect_bus(interface_type: str = DEFAULT_INTERFACE_TYPE,
             f"（无法导入 can.interfaces.{pycan}）。\n{needs}"
         )
 
+    # 未显式指定时取全局 FD 开关（连接页勾选 / 配置恢复）
+    if fd is None or data_bitrate is None:
+        g_fd, g_dbr = get_fd_mode()
+        if fd is None:
+            fd = g_fd
+        if data_bitrate is None:
+            data_bitrate = g_dbr
+
     try:
         if pycan == "virtual":
-            bus = can.Bus(interface="virtual", channel=channel)
+            # 虚拟后端没有 fd 参数，FD 模式只标记 protocol
+            kw = _build_fd_kwargs(pycan, bitrate, data_bitrate) if fd else {}
+            bus = can.Bus(interface="virtual", channel=channel, **kw)
+        elif fd:
+            bus = can.Bus(interface=pycan, channel=channel, bitrate=bitrate,
+                          **_build_fd_kwargs(pycan, bitrate, data_bitrate))
         else:
             bus = can.Bus(interface=pycan, channel=channel, bitrate=bitrate)
         return bus, None

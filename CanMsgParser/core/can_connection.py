@@ -17,7 +17,7 @@ import can
 
 from core.can_utils import (
     connect_bus, DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE,
-    DEVICE_TYPES,
+    DEVICE_TYPES, get_fd_mode,
 )
 
 
@@ -81,42 +81,68 @@ class CanConnectionManager(QObject):
         """返回当前连接配置（只读副本），供功能页自动连接时对齐参数。"""
         return dict(self._config) if self._config is not None else None
 
-    def config_matches(self, interface_type, channel, bitrate) -> bool:
+    def config_matches(self, interface_type, channel, bitrate,
+                       fd=None, data_bitrate=None) -> bool:
         if self._config is None:
             return False
-        return (self._config["interface_type"] == interface_type and
+        if not (self._config["interface_type"] == interface_type and
                 self._config["channel"] == channel and
-                self._config["bitrate"] == bitrate)
+                self._config["bitrate"] == bitrate):
+            return False
+        # 未显式给出时不比较 FD 参数（老调用点沿用当前连接即可）
+        if fd is None:
+            return True
+        if bool(self._config.get("fd", False)) != bool(fd):
+            return False
+        if fd and data_bitrate is not None:
+            return self._config.get("data_bitrate") == data_bitrate
+        return True
 
     # ── 连接 / 断开 ──
-    def connect(self, interface_type, channel, bitrate):
+    def connect(self, interface_type, channel, bitrate, fd=None, data_bitrate=None):
         """建立或复用共享总线。返回 (bus, None) 成功；(None, err) 失败。
 
         幂等：已连接且配置一致时直接返回已有总线；配置不一致且仍有监听者
         占用时拒绝（避免把正在用的设备踢掉）。
+
+        fd / data_bitrate 为 None 时取全局 FD 开关（can_utils.set_fd_mode），
+        这样各功能页自动连接时无需逐层传递参数也能对齐 FD 模式。
         """
+        g_fd, g_dbr = get_fd_mode()
+        if fd is None:
+            fd = g_fd
+        if data_bitrate is None:
+            data_bitrate = g_dbr
+        fd = bool(fd)
         if self._bus is not None:
-            if self.config_matches(interface_type, channel, bitrate):
+            if self.config_matches(interface_type, channel, bitrate, fd, data_bitrate):
                 return self._bus, None
+            cur = self._config or {}
+            cur_fd = f" · CAN FD {cur.get('data_bitrate')}" if cur.get("fd") else ""
             return None, (
                 f"设备已以不同配置连接（当前: "
-                f"{self._config['interface_type']} / {self._config['channel']} @ "
-                f"{self._config['bitrate']}）。\n"
+                f"{cur.get('interface_type')} / {cur.get('channel')} @ "
+                f"{cur.get('bitrate')}{cur_fd}）。\n"
                 f"请先在「连接状态」页断开，再修改配置后重新连接。"
             )
-        bus, err = connect_bus(interface_type, channel, bitrate)
+        bus, err = connect_bus(interface_type, channel, bitrate,
+                               fd=fd, data_bitrate=data_bitrate)
         if bus is None:
             return None, err
         self._bus = bus
         self._config = {"interface_type": interface_type,
-                        "channel": channel, "bitrate": bitrate}
+                        "channel": channel, "bitrate": bitrate,
+                        "fd": fd, "data_bitrate": data_bitrate}
         label = DEVICE_TYPES.get(interface_type, {}).get("label", interface_type)
-        self.state_changed.emit(True, f"{label} / {channel} @ {bitrate}")
+        fd_text = f" · CAN FD {data_bitrate}" if fd else ""
+        self.state_changed.emit(True, f"{label} / {channel} @ {bitrate}{fd_text}")
         return bus, None
 
-    def ensure_connected(self, interface_type, channel, bitrate):
+    def ensure_connected(self, interface_type, channel, bitrate,
+                         fd=None, data_bitrate=None):
         """功能页自动连接用：未连则连接，已连则复用。返回 (bus, None)/(None, err)。"""
-        return self.connect(interface_type, channel, bitrate)
+        return self.connect(interface_type, channel, bitrate,
+                            fd=fd, data_bitrate=data_bitrate)
 
     def dispatch(self, msg):
         """把本进程内「发出」的帧（如模拟上报发出的帧）主动 fan-out 给所有监听者。

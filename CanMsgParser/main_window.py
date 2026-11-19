@@ -29,7 +29,7 @@ from widgets.realtime_monitor_widget import RealtimeMonitorWidget
 from widgets.signal_sim_widget import SignalSimWidget
 from widgets.replay_widget import ReplayWidget
 from widgets.del_key_filter import DelKeyFilter
-from widgets.drag_reorder_list import DragReorderListWidget, EYE_ROLE
+from widgets.drag_reorder_list import DragReorderListWidget
 from core.can_connection import CanConnectionManager
 from workers.load_worker import LoadWorker, DecodeWorker
 from utils.export_utils import export_chart_image, export_signal_data
@@ -37,6 +37,7 @@ from utils.excel_value_loader import load_signal_value_db, load_value_descriptio
 from utils.font_helper import UI_FONT_FAMILY
 from utils.ui_scale import dp, scale_qss
 from version import APP_VERSION
+from widgets.item_payload import get_payload, set_eye_visible, set_payload
 
 # 配置文件路径，用于记住上次加载的 DBC 文件
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".canmsgparser_config.json")
@@ -488,6 +489,15 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # 恢复上次的 CAN FD 开关（仅同步 UI 与全局建链参数，不触发连接）
+        try:
+            self._conn_widget.set_fd_state(
+                bool(config.get("can_fd", False)),
+                config.get("can_fd_data_bitrate") or None,
+            )
+        except Exception:
+            pass
+
         # ── 运行时分辨率 / 缩放变化自适应（修复改分辨率后鼠标点击错位）──
         self._hidpi_pending = False
         self._install_hidpi_handlers()
@@ -543,17 +553,6 @@ class MainWindow(QMainWindow):
         self.show()
         self.setWindowState(state)
         self.updateGeometry()
-
-    def nativeEvent(self, eventType, message):
-        # 仅 Windows：分辨率变更时系统向所有顶层窗口广播 WM_DISPLAYCHANGE(0x007E)
-        if sys.platform == "win32" and eventType == b"windows_generic_MSG":
-            try:
-                msg = ctypes.wintypes.MSG.from_address(int(message))
-                if msg.message == 0x007E:  # WM_DISPLAYCHANGE
-                    self._schedule_hidpi_refresh()
-            except Exception:
-                pass
-        return super().nativeEvent(eventType, message)
 
     def _setup_ui(self):
         """构建主界面布局：Tab 页（曲线图 / 报文表格 / 模拟上报信号 /
@@ -1003,8 +1002,8 @@ class MainWindow(QMainWindow):
         self._selected_list.clear()
         for msg_name, sig_name in self._curve_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
-            item.setData(EYE_ROLE, (msg_name, sig_name) not in self._curve_hidden)
+            set_payload(item, (msg_name, sig_name))
+            set_eye_visible(item, (msg_name, sig_name) not in self._curve_hidden)
             self._selected_list.addItem(item)
         self._selected_list.blockSignals(False)
 
@@ -1017,7 +1016,7 @@ class MainWindow(QMainWindow):
         item = self._selected_list.item(row)
         if item is None:
             return
-        key = item.data(Qt.ItemDataRole.UserRole)
+        key = get_payload(item)
         if key is None:
             return
         key = tuple(key)
@@ -1039,7 +1038,7 @@ class MainWindow(QMainWindow):
     def _remove_selected_signals(self):
         """从已选列表中移除选中项（顺带清理其隐藏状态）"""
         for item in self._selected_list.selectedItems():
-            key = item.data(Qt.ItemDataRole.UserRole)
+            key = get_payload(item)
             if key is None:
                 continue
             self._curve_signals.remove(key)
@@ -1106,7 +1105,7 @@ class MainWindow(QMainWindow):
         """
         order = []
         for i in range(self._selected_list.count()):
-            data = self._selected_list.item(i).data(Qt.ItemDataRole.UserRole)
+            data = get_payload(self._selected_list.item(i))
             if data is not None:
                 order.append(tuple(data))
         self._curve_signals = order
@@ -1291,6 +1290,11 @@ class MainWindow(QMainWindow):
             config["last_excel_path"] = self._excel_path
         if self._group_config_path:
             config["last_group_config_path"] = self._group_config_path
+        try:
+            config["can_fd"] = self._conn_widget.get_fd_enabled()
+            config["can_fd_data_bitrate"] = self._conn_widget.get_data_bitrate()
+        except Exception:
+            pass
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)

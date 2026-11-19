@@ -103,6 +103,9 @@ class CanSimWorker(QThread):
                             arbitration_id=group.frame_id,
                             data=data,
                             is_extended_id=is_extended,
+                            # DBC 报文长度 > 8 时必须标记为 FD 帧，
+                            # 否则 python-can 校验直接拒绝
+                            is_fd=len(data) > 8,
                         ))
                         self.frame_sent.emit(
                             group.frame_id,

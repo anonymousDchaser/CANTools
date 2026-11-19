@@ -46,7 +46,7 @@ def test_remark_edit_and_autosave():
     # 编辑备注并触发 editingFinished
     le.setText("制动辅助模式状态")
     le.editingFinished.emit()
-    sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
+    sig_ref = item.data(0, Qt.ItemDataRole.UserRole + 200)
     assert sig_ref.remark == "制动辅助模式状态", f"备注应写回 SignalRef, got={sig_ref.remark}"
     assert w._dirty is True, "编辑备注应置脏标记"
 
@@ -84,7 +84,7 @@ def test_remark_roundtrip_on_load():
         item = w._sig_list.topLevelItem(0)
         le = w._sig_list.itemWidget(item, 1)
         assert le.text() == "刹车状态", f"加载后备注应回显, got={le.text()}"
-        sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
+        sig_ref = item.data(0, Qt.ItemDataRole.UserRole + 200)
         assert sig_ref.remark == "刹车状态"
         print("    OK: 加载配置后备注正确回显到可编辑列")
     finally:

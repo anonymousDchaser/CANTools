@@ -22,6 +22,7 @@ from core.can_utils import (DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_
 from core.can_connection import CanConnectionManager
 from core.can_data import MessageDef
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
 
 
 class RealtimeMonitorWidget(QWidget):
@@ -156,13 +157,13 @@ class RealtimeMonitorWidget(QWidget):
         self._sel_list.clear()
         for msg_name, sig_name in self._sel_signals:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
+            set_payload(item, (msg_name, sig_name))
             self._sel_list.addItem(item)
         self._sel_list.blockSignals(False)
 
     def _remove_selected(self):
         for item in self._sel_list.selectedItems():
-            data = item.data(Qt.ItemDataRole.UserRole)
+            data = get_payload(item)
             if data in self._sel_signals:
                 self._sel_signals.remove(data)
         self._refresh_sel_list()
@@ -179,7 +180,7 @@ class RealtimeMonitorWidget(QWidget):
         """已选信号列表拖拽排序回调：同步顺序，并按新顺序重排实时曲线。"""
         order = []
         for i in range(self._sel_list.count()):
-            data = self._sel_list.item(i).data(Qt.ItemDataRole.UserRole)
+            data = get_payload(self._sel_list.item(i))
             if data is not None:
                 order.append(tuple(data))
         self._sel_signals = order

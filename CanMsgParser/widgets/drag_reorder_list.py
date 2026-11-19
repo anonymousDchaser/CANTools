@@ -26,14 +26,15 @@ from PyQt6.QtWidgets import (
 )
 
 from widgets.elided_tooltip import ElidedToolTipMixin
+from widgets.item_payload import get_eye_visible, get_payload, set_eye_visible
 
 # 拖拽行号的自定义 MIME 类型（仅限本控件内部移动）
 _MIME_TYPE = "application/x-canmsgparser-drag-row"
 
-# 行首「眼睛」图标状态的自定义 item data 角色：
-# True = 睁开（显示曲线），False = 闭合（隐藏曲线）。
-# 读取一律用 `is not False` 判定，未设置过该角色的行按「显示」处理。
-EYE_ROLE = Qt.ItemDataRole.UserRole + 100
+# 行首「眼睛」图标状态（True=睁开/显示曲线，False=闭合/隐藏曲线）
+# 通过 widgets.item_payload 的属性存取，不使用 QVariant 自定义角色：
+# PyQt6 + Python 3.14 下后者会在绘制时触发访问违规。
+# 未设置过的行按「显示」处理。
 
 # 行首眼睛图标区域宽度（像素）。与 HANDLE_WIDTH 一样取固定值，不参与分辨率缩放，
 # 以保持与已有把手/行高的视觉比例一致。
@@ -84,8 +85,8 @@ class _HandleDelegate(QStyledItemDelegate):
 
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
         if is_eye_col:
-            # 未设置 EYE_ROLE 的行按「显示」处理，避免历史行被画成闭眼
-            visible = index.data(EYE_ROLE) is not False
+            # 未设置眼睛状态的行按「显示」处理，避免历史行被画成闭眼
+            visible = self._owner.eyeVisible(index.row())
             self._draw_eye(painter, option.rect, visible)
         if is_handle_col:
             self._draw_handle(painter, option.rect, index.row(), armed_row)
@@ -154,7 +155,7 @@ class _HandleDelegate(QStyledItemDelegate):
         painter.setBrush(color)
         for dx in (-3, 3):
             for dy in (-6, 0, 6):
-                painter.drawEllipse(QPoint(cx + dx, cy + dy), 1.6, 1.6)
+                painter.drawEllipse(QPointF(cx + dx, cy + dy), 1.6, 1.6)
         painter.restore()
 
 
@@ -175,7 +176,7 @@ class DragReorderMixin:
         _dnd_handle_rect() -> QRect     把手命中区域（viewport 坐标）
         _dnd_row_allowed(row) -> bool   该行是否可参与拖拽
 
-    顺序变化后发出 orderChanged()（无参数），外部遍历各行 data(Qt.ItemDataRole.UserRole)
+    顺序变化后发出 orderChanged()（无参数），外部遍历各行 data(Qt.ItemDataRole.UserRole + 200)
     即可得到新顺序。被移动行的新行号可通过 lastMovedRow() 查询——宿主若用
     setItemWidget 挂载了行内控件（如备注编辑框），只需重建该行即可，
     其余行的 item widget 不受 take/insert 影响。
@@ -244,16 +245,16 @@ class DragReorderMixin:
         item = self._dnd_row_item(row)
         if item is None:
             return True
-        return item.data(EYE_ROLE) is not False
+        return get_eye_visible(item)
 
     def set_eye_visible(self, row: int, visible: bool):
         """设置该行眼睛状态并重绘该行（不发 eyeToggled，供外部回填/同步使用）。"""
         item = self._dnd_row_item(row)
         if item is None:
             return
-        if (item.data(EYE_ROLE) is not False) == bool(visible):
+        if get_eye_visible(item) == bool(visible):
             return
-        item.setData(EYE_ROLE, bool(visible))
+        set_eye_visible(item, visible)
         self._update_row(row)
 
     def _eye_rect(self, row: int) -> QRect:
@@ -589,4 +590,4 @@ class DragReorderTreeWidget(DragReorderMixin, ElidedToolTipMixin, QTreeWidget):
 
     def _dnd_row_allowed(self, row) -> bool:
         item = self.topLevelItem(row) if 0 <= row < self.topLevelItemCount() else None
-        return item is not None and item.data(0, Qt.ItemDataRole.UserRole) is not None
+        return item is not None and get_payload(item) is not None

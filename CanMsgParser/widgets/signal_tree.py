@@ -16,6 +16,7 @@ from widgets.del_key_filter import DelKeyFilter
 from widgets.elided_tooltip import ElidedListWidget, ElidedTreeWidget
 from widgets.theme import DARK_PANEL_QSS
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
 
 
 class SignalTreeWidget(QWidget):
@@ -216,7 +217,7 @@ class SignalTreeWidget(QWidget):
             msg_item = QTreeWidgetItem(self._tree)
             msg_item.setText(0, msg.name)
             msg_item.setText(1, f"0x{msg.frame_id:03X}")
-            msg_item.setData(0, Qt.ItemDataRole.UserRole, msg)
+            set_payload(msg_item, msg)
             self._all_items[msg.name] = msg_item
             for sig in msg.signals:
                 sig_item = QTreeWidgetItem(msg_item)
@@ -224,7 +225,7 @@ class SignalTreeWidget(QWidget):
                 sig_item.setText(1, sig.unit)
                 sig_item.setFlags(sig_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 sig_item.setCheckState(0, Qt.CheckState.Unchecked)
-                sig_item.setData(0, Qt.ItemDataRole.UserRole, sig)
+                set_payload(sig_item, sig)
         self._tree.blockSignals(False)
         self._refresh_checked_list()
 
@@ -290,7 +291,7 @@ class SignalTreeWidget(QWidget):
             msg_item = self._tree.topLevelItem(i)
             msg_name = msg_item.text(0).lower()
             msg_id_text = msg_item.text(1).lower()  # "0x1a0" 等
-            msg_def = msg_item.data(0, Qt.ItemDataRole.UserRole)
+            msg_def = get_payload(msg_item)
 
             # 按名称匹配（始终生效）
             name_match = text_lower in msg_name
@@ -338,7 +339,7 @@ class SignalTreeWidget(QWidget):
         pairs = self.get_checked_signals()
         for msg_name, sig_name in pairs:
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
+            set_payload(item, (msg_name, sig_name))
             # 右列较窄时文本仍可能被截断，悬停可见完整「信号名 + 所属报文」
             item.setToolTip(f"{sig_name}\n所属报文: {msg_name}")
             self._checked_list.addItem(item)
@@ -352,7 +353,7 @@ class SignalTreeWidget(QWidget):
         即使目标信号因当前搜索被隐藏，set_signal_checked 仍会遍历所有项
         找到并取消其勾选，随后触发的 _on_item_changed 会刷新本列表。
         """
-        pairs = [item.data(Qt.ItemDataRole.UserRole) for item in self._checked_list.selectedItems()]
+        pairs = [get_payload(item) for item in self._checked_list.selectedItems()]
         for msg_name, sig_name in pairs:
             self.set_signal_checked(msg_name, sig_name, False)
 

@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from utils.font_helper import UI_FONT_FAMILY
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
 
 # 「全部」项的显示文本（其 UserRole 为 None，作为快捷项标记）
 _ALL_TEXT = "全部"
@@ -255,7 +256,7 @@ class MultiSelectIdFilter(QToolButton):
     @staticmethod
     def _new_item(text, data):
         item = QListWidgetItem(text)
-        item.setData(Qt.ItemDataRole.UserRole, data)
+        set_payload(item, data)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
         return item
 
@@ -265,7 +266,7 @@ class MultiSelectIdFilter(QToolButton):
         try:
             for i in range(self._list.count()):
                 item = self._list.item(i)
-                aid = item.data(Qt.ItemDataRole.UserRole)
+                aid = get_payload(item)
                 if aid is None:
                     item.setCheckState(
                         Qt.CheckState.Checked if not self._checked else Qt.CheckState.Unchecked
@@ -303,7 +304,7 @@ class MultiSelectIdFilter(QToolButton):
         out = []
         for i in range(self._list.count()):
             item = self._list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) is not None and not item.isHidden():
+            if get_payload(item) is not None and not item.isHidden():
                 out.append(item)
         return out
 
@@ -313,7 +314,7 @@ class MultiSelectIdFilter(QToolButton):
         matched = 0
         for i in range(self._list.count()):
             item = self._list.item(i)
-            aid = item.data(Qt.ItemDataRole.UserRole)
+            aid = get_payload(item)
             if aid is None:
                 # 「全部」快捷项：搜索时让位给具体 ID（清空搜索即恢复显示）
                 item.setHidden(bool(query))
@@ -370,7 +371,7 @@ class MultiSelectIdFilter(QToolButton):
     def _on_item_changed(self, item) -> None:
         if self._updating:
             return
-        aid = item.data(Qt.ItemDataRole.UserRole)
+        aid = get_payload(item)
         checked = item.checkState() == Qt.CheckState.Checked
         if aid is None:
             # 「全部」：勾选 = 清空其它勾选；取消勾选而其它项也没勾选 → 恢复

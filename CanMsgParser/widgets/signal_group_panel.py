@@ -24,6 +24,25 @@ from widgets.theme import DARK_PANEL_QSS
 from widgets.del_key_filter import DelKeyFilter
 from widgets.drag_reorder_list import DragReorderTreeWidget
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
+
+
+# PyQt6 的 Qt.ItemFlag 是 enum.Flag（不是 IntFlag）：
+# `~Qt.ItemFlag.X` 与 `int(flags)` 都会抛 TypeError。
+# 统一取 .value 在整型域清位，再重建枚举；清位只会从合法组合里去掉位，
+# 结果仍是合法组合，重建枚举安全。
+
+
+def _flag_value(flag) -> int:
+    value = getattr(flag, "value", None)
+    return int(value) if value is not None else int(flag)
+
+
+def _clear_item_flags(flags, *to_clear) -> "Qt.ItemFlag":
+    value = _flag_value(flags)
+    for flag in to_clear:
+        value &= ~_flag_value(flag)
+    return Qt.ItemFlag(value)
 
 
 @dataclass
@@ -274,13 +293,13 @@ class SignalGroupPanel(QWidget):
         result = []
         for i in range(self._sig_list.topLevelItemCount()):
             top = self._sig_list.topLevelItem(i)
-            sig_ref = top.data(0, Qt.ItemDataRole.UserRole)
+            sig_ref = get_payload(top)
             if sig_ref is not None and (top.flags() & Qt.ItemFlag.ItemIsUserCheckable) \
                     and top.checkState(0) == Qt.CheckState.Checked:
                 result.append((sig_ref.msg_name, sig_ref.sig_name))
             for j in range(top.childCount()):
                 child = top.child(j)
-                cs = child.data(0, Qt.ItemDataRole.UserRole)
+                cs = get_payload(child)
                 if cs is not None and (child.flags() & Qt.ItemFlag.ItemIsUserCheckable) \
                         and child.checkState(0) == Qt.CheckState.Checked:
                     result.append((cs.msg_name, cs.sig_name))
@@ -406,7 +425,11 @@ class SignalGroupPanel(QWidget):
                 header = QTreeWidgetItem(self._sig_list)
                 header.setText(0, f"{g.name}  ({len(matches)} 信号)")
                 header.setFlags(
-                    header.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsUserCheckable
+                    _clear_item_flags(
+                        header.flags(),
+                        Qt.ItemFlag.ItemIsSelectable,
+                        Qt.ItemFlag.ItemIsUserCheckable,
+                    )
                 )
                 header.setForeground(0, QColor("#9090a0"))
                 hf = header.font(0)
@@ -496,7 +519,7 @@ class SignalGroupPanel(QWidget):
         item = QTreeWidgetItem(parent) if parent is not None \
             else QTreeWidgetItem(self._sig_list)
         item.setText(0, f"{sig_ref.sig_name}  ({sig_ref.msg_name} · {sig_ref.frame_id})")
-        item.setData(0, Qt.ItemDataRole.UserRole, sig_ref)
+        set_payload(item, sig_ref)
 
         matched = (sig_ref.msg_name, sig_ref.sig_name) in self._dbc_lookup
         if matched:
@@ -508,7 +531,11 @@ class SignalGroupPanel(QWidget):
         else:
             # 置灰不可勾选
             item.setFlags(
-                item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable & ~Qt.ItemFlag.ItemIsEnabled
+                _clear_item_flags(
+                    item.flags(),
+                    Qt.ItemFlag.ItemIsUserCheckable,
+                    Qt.ItemFlag.ItemIsEnabled,
+                )
             )
             item.setToolTip(0, "当前 DBC 中未找到此信号")
             item.setForeground(0, QColor("#555560"))
@@ -545,7 +572,7 @@ class SignalGroupPanel(QWidget):
         if not 0 <= row < self._sig_list.topLevelItemCount():
             return
         item = self._sig_list.topLevelItem(row)
-        sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
+        sig_ref = get_payload(item)
         if sig_ref is not None:
             self._attach_remark_editor(item, sig_ref)
 
@@ -567,7 +594,7 @@ class SignalGroupPanel(QWidget):
         g = self._groups[self._current_group_idx]
         new_order = []
         for i in range(self._sig_list.topLevelItemCount()):
-            sig_ref = self._sig_list.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+            sig_ref = get_payload(self._sig_list.topLevelItem(i))
             if sig_ref is not None:
                 new_order.append(sig_ref)
         if len(new_order) == len(g.signals) and new_order != g.signals:
@@ -587,7 +614,7 @@ class SignalGroupPanel(QWidget):
 
     def _on_remark_edited(self, item, line_edit):
         """备注编辑完成——写回 SignalRef 并标记脏（触发自动保存）。"""
-        sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
+        sig_ref = get_payload(item)
         if sig_ref is not None:
             sig_ref.remark = line_edit.text().strip()
             self._dirty = True
@@ -600,7 +627,7 @@ class SignalGroupPanel(QWidget):
 
         changed = False
         for item in selected:
-            sig_ref = item.data(0, Qt.ItemDataRole.UserRole)
+            sig_ref = get_payload(item)
             if sig_ref is None:
                 continue
             for g in self._groups:

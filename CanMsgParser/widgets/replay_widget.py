@@ -35,6 +35,7 @@ from core.can_utils import (
 )
 from core.log_loader import AscMessageReader
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
 
 # 单次定时器回调内最多连续发出的帧数。
 # 用于限制「极端高密度日志 + 高倍速」下的单次阻塞时长：超出的帧留到下一次
@@ -430,7 +431,7 @@ class ReplayWidget(QWidget):
             item = QListWidgetItem(text)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
-            item.setData(Qt.ItemDataRole.UserRole, fid)
+            set_payload(item, fid)
             self._id_list.addItem(item)
         self._id_list.blockSignals(False)
 
@@ -445,7 +446,7 @@ class ReplayWidget(QWidget):
         for i in range(self._id_list.count()):
             item = self._id_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:
-                ids.add(item.data(Qt.ItemDataRole.UserRole))
+                ids.add(get_payload(item))
         return ids
 
     # ────────────────────── 回放控制 ──────────────────────

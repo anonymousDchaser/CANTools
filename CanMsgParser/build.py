@@ -70,6 +70,25 @@ def _dir_size(path):
     return total
 
 
+
+def _sign_identity() -> str:
+    """分发签名身份：CI 由 MAC_SIGN_IDENTITY 注入，本地未设置时为空。"""
+    return os.environ.get("MAC_SIGN_IDENTITY", "").strip()
+
+
+def _codesign_cmd(app_path) -> list:
+    """组装 codesign 命令。
+
+    设了 MAC_SIGN_IDENTITY（Developer ID Application）就走真签名：
+    --options runtime 启用强化运行时、--timestamp 带可信时间戳，这两项是
+    Apple 公证的前置条件；否则退回 ad-hoc（"-"），保证本机双击能打开。
+    """
+    identity = _sign_identity() or "-"
+    cmd = ["codesign", "--force", "--deep", "--sign", identity]
+    if identity != "-":
+        cmd += ["--options", "runtime", "--timestamp"]
+    cmd.append(app_path)
+    return cmd
 def _patch_macos_bundle(app_path):
     """把版本号写进 .app 的 Info.plist，并重新做 ad-hoc 签名。
 
@@ -100,12 +119,10 @@ def _patch_macos_bundle(app_path):
         if r.returncode != 0:
             print(f"警告: 写入 {key} 失败: {(r.stderr or r.stdout).strip()}")
 
-    r = subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", app_path],
-        capture_output=True, text=True,
-    )
+    r = subprocess.run(_codesign_cmd(app_path), capture_output=True, text=True)
     if r.returncode == 0:
-        print(f"已写入 bundle 版本 {APP_VERSION} 并重新 ad-hoc 签名")
+        kind = "Developer ID" if _sign_identity() else "ad-hoc"
+        print(f"已写入 bundle 版本 {APP_VERSION} 并完成签名（{kind}）")
     else:
         print("警告: 重新签名失败（App 可能被 Gatekeeper 拒绝启动）: "
               f"{(r.stderr or r.stdout).strip()[:400]}")

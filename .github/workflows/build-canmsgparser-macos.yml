@@ -29,6 +29,15 @@ jobs:
     timeout-minutes: 45
     # Intel 机型的 runner 标签变动较频繁，标记为实验性：失败不阻塞 arm64 产物
     continue-on-error: ${{ matrix.experimental }}
+    # Apple 签名 / 公证凭据。全部来自仓库 Secrets，且允许为空：
+    # 没配时整条签名链自动跳过，产物退回 ad-hoc 签名（仍可右键打开）。
+    # 配齐后产物为 Developer ID 签名 + 公证 + 装订，用户双击即可运行。
+    env:
+      MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+      MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      MAC_NOTARY_APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
+      MAC_NOTARY_TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
+      MAC_NOTARY_PASSWORD: ${{ secrets.MAC_NOTARY_APP_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
@@ -57,6 +66,34 @@ jobs:
           grep -v -i '^uptime' requirements.txt > /tmp/req-mac.txt
           pip install -r /tmp/req-mac.txt
           pip install "pyinstaller>=6.10"
+
+      - name: 导入 Developer ID 证书（有证书才执行）
+        if: env.MAC_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          KEYCHAIN="build-signing.keychain-db"
+          KEYCHAIN_PASS="$(python -c 'import secrets;print(secrets.token_hex(16))')"
+          echo "$MAC_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security import /tmp/cert.p12 -k "$KEYCHAIN" \
+            -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          # 允许 codesign 无交互访问私钥，否则签名会卡在授权弹窗
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          rm -f /tmp/cert.p12
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | sed -n 's/.*"\(Developer ID Application.*\)"/\1/p' | head -1)"
+          if [ -z "$IDENTITY" ]; then
+            echo "未找到 Developer ID Application 证书，退回 ad-hoc 签名"
+            exit 0
+          fi
+          echo "签名身份: $IDENTITY"
+          echo "MAC_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: 生成 app.icns
         run: python tools/make_icns.py
@@ -92,6 +129,31 @@ jobs:
 
       - name: 制作 dmg 与便携 zip
         run: python build_installer.py
+
+      # 公证前置条件：.app 必须是 Developer ID 签名 + 强化运行时 + 时间戳
+      # （build.py / build_installer.py 在读到 MAC_SIGN_IDENTITY 时自动加这两项）。
+      # 没有凭据时整步跳过，产物仍是 ad-hoc 签名——功能可用，但他人机器需右键打开。
+      - name: 公证 dmg 并装订票据
+        if: env.MAC_SIGN_IDENTITY != '' && env.MAC_NOTARY_APPLE_ID != ''
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          DMG="$(ls installer/output/*.dmg | head -1)"
+          test -n "$DMG" || { echo "没有产出 dmg"; exit 1; }
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$MAC_NOTARY_APPLE_ID" \
+            --team-id "$MAC_NOTARY_TEAM_ID" \
+            --password "$MAC_NOTARY_PASSWORD" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: Gatekeeper 校验（真签名时）
+        if: env.MAC_SIGN_IDENTITY != ''
+        run: |
+          set -euo pipefail
+          spctl -a -vvv --type exec dist/CanMsgParser.app
+          codesign -dv --verbose=4 dist/CanMsgParser.app 2>&1 | head -20
 
       # 真机校验：只 verify 容器不够，还要把 dmg 挂起来确认 .app 能执行、
       # 架构与版本号都对得上（交叉架构产物最容易在这里露出马脚）。

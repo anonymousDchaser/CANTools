@@ -9,13 +9,14 @@
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QPushButton, QComboBox, QFileDialog, QMessageBox,
+    QPushButton, QComboBox, QCheckBox, QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import pyqtSignal
 
 from core.can_utils import (
-    DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_INTERFACE_TYPE,
-    DEVICE_TYPES, interface_available,
+    DEFAULT_CHANNEL, DEFAULT_BITRATE, DEFAULT_DATA_BITRATE,
+    DEFAULT_INTERFACE_TYPE, DEVICE_TYPES, FD_DATA_BITRATES,
+    interface_available, set_fd_mode,
 )
 from core.can_connection import CanConnectionManager
 from utils.ui_scale import dp
@@ -107,6 +108,24 @@ class ConnectionStatusWidget(QWidget):
         self._bitrate_combo.setCurrentText(str(DEFAULT_BITRATE))
         ch_row.addWidget(self._bitrate_combo)
         can_layout.addLayout(ch_row)
+
+        # CAN FD：勾选后按 FD 建链（仲裁段用上面的波特率，数据段用这里的值）。
+        # 默认不勾选，避免没接 FD 设备时做 FD 位定时协商失败。
+        fd_row = QHBoxLayout()
+        fd_row.setSpacing(dp(6))
+        self._fd_check = QCheckBox("启用 CAN FD")
+        self._fd_check.toggled.connect(self._on_fd_toggled)
+        fd_row.addWidget(self._fd_check)
+        fd_row.addWidget(QLabel("数据段波特率:"))
+        self._dbr_combo = QComboBox()
+        self._dbr_combo.setEditable(True)
+        for _b in FD_DATA_BITRATES:
+            self._dbr_combo.addItem(str(_b))
+        self._dbr_combo.setCurrentText(str(DEFAULT_DATA_BITRATE))
+        self._dbr_combo.setEnabled(False)
+        fd_row.addWidget(self._dbr_combo)
+        fd_row.addStretch()
+        can_layout.addLayout(fd_row)
 
         # 依据默认设备类型填充通道下拉
         self._refresh_channels()
@@ -204,6 +223,10 @@ class ConnectionStatusWidget(QWidget):
         interface_type = self.get_interface_type()
         channel = self.get_channel()
         bitrate = self.get_bitrate()
+        fd = self.get_fd_enabled()
+        data_bitrate = self.get_data_bitrate()
+        # 先写入全局 FD 开关：各功能页自动建链时靠它对齐模式
+        set_fd_mode(fd, data_bitrate)
 
         # 后端可用性校验：缺驱动/依赖时明确拦截，绝不假「已连接」
         if not interface_available(interface_type):
@@ -229,7 +252,10 @@ class ConnectionStatusWidget(QWidget):
 
         # 真正建立共享总线（进程内唯一一条）。UI 由 manager.state_changed
         # 统一驱动，故此处成功只推送配置给各功能页即可。
-        bus, err = self._manager.connect(interface_type, channel, bitrate)
+        bus, err = self._manager.connect(
+            interface_type, channel, bitrate,
+            fd=fd, data_bitrate=data_bitrate,
+        )
         if bus is None:
             QMessageBox.critical(self, "CAN 连接失败", err)
             self._set_disconnected_ui()
@@ -263,6 +289,8 @@ class ConnectionStatusWidget(QWidget):
         self._device_combo.setEnabled(False)
         self._channel_combo.setEnabled(False)
         self._bitrate_combo.setEnabled(False)
+        self._fd_check.setEnabled(False)
+        self._dbr_combo.setEnabled(False)
 
     def _set_disconnected_ui(self):
         self._connected = False
@@ -273,6 +301,8 @@ class ConnectionStatusWidget(QWidget):
         self._device_combo.setEnabled(True)
         self._channel_combo.setEnabled(True)
         self._bitrate_combo.setEnabled(True)
+        self._fd_check.setEnabled(True)
+        self._dbr_combo.setEnabled(self._fd_check.isChecked())
 
     def get_interface_type(self) -> str:
         return self._device_combo.currentData() or DEFAULT_INTERFACE_TYPE
@@ -285,6 +315,29 @@ class ConnectionStatusWidget(QWidget):
             return int(self._bitrate_combo.currentText())
         except ValueError:
             return DEFAULT_BITRATE
+
+    def _on_fd_toggled(self, checked: bool):
+        self._dbr_combo.setEnabled(bool(checked) and self._connect_btn.isEnabled())
+        set_fd_mode(checked, self.get_data_bitrate())
+
+    def get_fd_enabled(self) -> bool:
+        return self._fd_check.isChecked()
+
+    def get_data_bitrate(self) -> int:
+        try:
+            return int(self._dbr_combo.currentText())
+        except ValueError:
+            return DEFAULT_DATA_BITRATE
+
+    def set_fd_state(self, enabled: bool, data_bitrate=None):
+        """由配置文件恢复 FD 开关（只同步 UI 与全局状态，不触发连接）。"""
+        self._fd_check.blockSignals(True)
+        self._fd_check.setChecked(bool(enabled))
+        self._fd_check.blockSignals(False)
+        if data_bitrate:
+            self._dbr_combo.setCurrentText(str(data_bitrate))
+        self._dbr_combo.setEnabled(bool(enabled) and self._connect_btn.isEnabled())
+        set_fd_mode(bool(enabled), self.get_data_bitrate())
 
     def is_connected(self) -> bool:
         return self._connected

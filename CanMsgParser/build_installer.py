@@ -121,6 +121,25 @@ def make_setup_windows() -> str | None:
     return out if os.path.exists(out) else None
 
 
+
+def _sign_identity() -> str:
+    """分发签名身份：CI 由 MAC_SIGN_IDENTITY 注入，本地未设置时为空。"""
+    return os.environ.get("MAC_SIGN_IDENTITY", "").strip()
+
+
+def _codesign_cmd(app_path) -> list:
+    """组装 codesign 命令。
+
+    设了 MAC_SIGN_IDENTITY（Developer ID Application）就走真签名：
+    --options runtime 启用强化运行时、--timestamp 带可信时间戳，这两项是
+    Apple 公证的前置条件；否则退回 ad-hoc（"-"），保证本机双击能打开。
+    """
+    identity = _sign_identity() or "-"
+    cmd = ["codesign", "--force", "--deep", "--sign", identity]
+    if identity != "-":
+        cmd += ["--options", "runtime", "--timestamp"]
+    cmd.append(app_path)
+    return cmd
 def make_dmg_mac() -> str | None:
     """用 hdiutil 生成 dmg（含 /Applications 快捷方式，拖拽安装）。"""
     if not os.path.isdir(DIST_APP):
@@ -144,11 +163,10 @@ def make_dmg_mac() -> str | None:
     subprocess.run(["cp", "-R", DIST_APP, stage], check=True)
     os.symlink("/Applications", os.path.join(stage, "Applications"))
 
-    # ad-hoc 签名：未签名的 .app 在新版 macOS 上会被报「已损坏」；
-    # 用 "-" 做本地临时签名可以正常打开（分发到他人机器仍需右键→打开）。
+    # 签名：未签名的 .app 在新版 macOS 上会被报「已损坏」。有 Developer ID
+    # 证书时用真签名（公证前置条件），否则 ad-hoc 兜底保证本机可打开。
     subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-",
-         os.path.join(stage, f"{APP_NAME}.app")],
+        _codesign_cmd(os.path.join(stage, f"{APP_NAME}.app")),
         check=False,
     )
 

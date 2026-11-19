@@ -71,7 +71,7 @@ def _visible(flt):
         item = flt._list.item(i)
         if item.isHidden():
             continue
-        data = item.data(Qt.ItemDataRole.UserRole)
+        data = item.data(Qt.ItemDataRole.UserRole + 200)
         out.append(None if data is None else int(data))
     return out
 
@@ -217,7 +217,7 @@ class TestMessageTableSearchToFilter:
         assert table._model.rowCount() == 5
 
         id_filter = table._id_filter
-        ids = [id_filter._list.item(i).data(Qt.ItemDataRole.UserRole)
+        ids = [id_filter._list.item(i).data(Qt.ItemDataRole.UserRole + 200)
                for i in range(id_filter._list.count())
                if not id_filter._list.item(i).isHidden()]
         assert ids == [None, 0x1A0, 0x1A1], "候选 ID 应按升序注入"
@@ -225,7 +225,7 @@ class TestMessageTableSearchToFilter:
         # 搜到 0x1A1 后整行勾选（不依赖小方块命中）-> 表格立即按 ID 过滤
         _type(id_filter, "1A1")
         row = [i for i in range(id_filter._list.count())
-               if id_filter._list.item(i).data(Qt.ItemDataRole.UserRole) == 0x1A1][0]
+               if id_filter._list.item(i).data(Qt.ItemDataRole.UserRole + 200) == 0x1A1][0]
         id_filter._list.item(row).setCheckState(Qt.CheckState.Checked)
         assert table._model.rowCount() == 2, "0x1A1 出现 2 次"
 
@@ -233,7 +233,7 @@ class TestMessageTableSearchToFilter:
         id_filter._search.clear()
         _type(id_filter, "1A0")
         row0 = [i for i in range(id_filter._list.count())
-                if id_filter._list.item(i).data(Qt.ItemDataRole.UserRole) == 0x1A0][0]
+                if id_filter._list.item(i).data(Qt.ItemDataRole.UserRole + 200) == 0x1A0][0]
         id_filter._list.item(row0).setCheckState(Qt.CheckState.Checked)
         assert table._model.rowCount() == 5, "两个 ID 合计 5 帧"
         assert id_filter.selected_ids() == [0x1A0, 0x1A1]

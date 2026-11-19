@@ -21,6 +21,7 @@ from core.can_data import MessageDef, SignalDef
 from utils.bit_utils import get_bit_positions
 from utils.font_helper import UI_FONT_FAMILY, ui_font
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
 
 # 高对比度暖色调色板 — 避免黑色/深色，全部中高亮度
 SIGNAL_COLORS = [
@@ -284,12 +285,12 @@ class BitLayoutView(QWidget):
             if matched_sigs:
                 display = f"0x{msg.frame_id:03X} — {msg.name}  ({len(matched_sigs)} 信号)"
                 item = QListWidgetItem(display)
-                item.setData(Qt.ItemDataRole.UserRole, msg)
+                set_payload(item, msg)
                 self._candidate_list.addItem(item)
 
     def _on_candidate_selected(self, item: QListWidgetItem):
         """选中候选后渲染位图"""
-        msg = item.data(Qt.ItemDataRole.UserRole)
+        msg = get_payload(item)
         if msg:
             self._render_layout(msg)
 
@@ -496,7 +497,7 @@ class BitLayoutView(QWidget):
                 if len(excel_desc) > 5:
                     desc_text += "..."
             item.setText(9, desc_text)
-            item.setData(0, Qt.ItemDataRole.UserRole, sig.name)
+            set_payload(item, sig.name)
 
         # 填充数据后自动调整所有列宽
         for i in range(self._sig_list.columnCount()):
@@ -508,7 +509,7 @@ class BitLayoutView(QWidget):
 
     def _on_sig_highlight(self, item: QTreeWidgetItem, column: int):
         """点击信号列表项，高亮对应色块"""
-        sig_name = item.data(0, Qt.ItemDataRole.UserRole)
+        sig_name = get_payload(item)
         if not sig_name:
             return
 

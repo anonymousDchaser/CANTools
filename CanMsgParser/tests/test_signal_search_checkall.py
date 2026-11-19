@@ -66,11 +66,11 @@ def _iter_group_items(w):
     items = []
     for i in range(w._sig_list.topLevelItemCount()):
         top = w._sig_list.topLevelItem(i)
-        if top.flags() & Qt.ItemFlag.ItemIsUserCheckable and top.data(0, Qt.ItemDataRole.UserRole) is not None:
+        if top.flags() & Qt.ItemFlag.ItemIsUserCheckable and top.data(0, Qt.ItemDataRole.UserRole + 200) is not None:
             items.append(top)
         for j in range(top.childCount()):
             child = top.child(j)
-            if child.flags() & Qt.ItemFlag.ItemIsUserCheckable and child.data(0, Qt.ItemDataRole.UserRole) is not None:
+            if child.flags() & Qt.ItemFlag.ItemIsUserCheckable and child.data(0, Qt.ItemDataRole.UserRole + 200) is not None:
                 items.append(child)
     return items
 

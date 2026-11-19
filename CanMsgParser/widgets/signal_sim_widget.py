@@ -43,6 +43,7 @@ from widgets.del_key_filter import DelKeyFilter
 from widgets.elided_tooltip import ElidedListWidget
 from core.can_data import MessageDef, SignalDef
 from utils.ui_scale import dp
+from widgets.item_payload import get_payload, set_payload
 
 
 # 列索引（分组树：顶层=报文组，子层=信号）
@@ -328,6 +329,7 @@ class _SimSendWorker(QThread):
                 arbitration_id=frame_id,
                 data=data,
                 is_extended_id=frame_id > 0x7FF,
+                is_fd=len(data) > 8,
             )
             bus.send(frame)
             # 发送侧主动 fan-out：PCAN 不回环自身发出的帧，收帧线程收不到，
@@ -721,7 +723,7 @@ class SignalSimWidget(QWidget):
             if grp is None:
                 grp_item = QTreeWidgetItem(self._value_table)
                 grp_item.setText(COL_SIG, f"报文组 0x{frame_id:03X}  {msg_name}")
-                grp_item.setData(COL_SIG, Qt.ItemDataRole.UserRole, frame_id)
+                set_payload(grp_item, frame_id)
                 # 组周期（组内所有信号共享）
                 cycle_spin = QSpinBox()
                 cycle_spin.setRange(10, 5000)
@@ -766,7 +768,7 @@ class SignalSimWidget(QWidget):
             # ── 信号子行 ──
             row = QTreeWidgetItem(grp["item"])
             row.setText(COL_SIG, f"{sig_name}  ({msg_name})")
-            row.setData(COL_SIG, Qt.ItemDataRole.UserRole, key)
+            set_payload(row, key)
 
             row.setText(COL_FORMULA, self._formula_text(sdef) if sdef else "")
             row.setText(COL_DETAIL, "")
@@ -898,7 +900,7 @@ class SignalSimWidget(QWidget):
         self._sel_list.clear()
         for msg_name, sig_name in sorted(self._sel_signals):
             item = QListWidgetItem(f"{sig_name}  ({msg_name})")
-            item.setData(Qt.ItemDataRole.UserRole, (msg_name, sig_name))
+            set_payload(item, (msg_name, sig_name))
             self._sel_list.addItem(item)
         self._sel_list.blockSignals(False)
 
@@ -938,7 +940,7 @@ class SignalSimWidget(QWidget):
             if grp_item is not None:
                 for ci in range(grp_item.childCount()):
                     child = grp_item.child(ci)
-                    if child.data(COL_SIG, Qt.ItemDataRole.UserRole) == key:
+                    if get_payload(child) == key:
                         grp_item.takeChild(ci)
                         break
         # 组内已无「用户已选」信号时整组销毁：否则勾了「所有信号」的组在用户
@@ -957,7 +959,7 @@ class SignalSimWidget(QWidget):
         self._refresh_sel_list()
 
     def _remove_selected(self):
-        keys = {item.data(Qt.ItemDataRole.UserRole) for item in self._sel_list.selectedItems()}
+        keys = {get_payload(item) for item in self._sel_list.selectedItems()}
         if not keys:
             return
         self._sel_signals -= keys
@@ -1063,7 +1065,7 @@ class SignalSimWidget(QWidget):
         if msg_name:
             title += f"  {msg_name}"
         grp_item.setText(COL_SIG, title)
-        grp_item.setData(COL_SIG, Qt.ItemDataRole.UserRole, frame_id)
+        set_payload(grp_item, frame_id)
         grp_item.setText(COL_FORMULA, f"原始数据（{dlc} 字节）")
         grp_item.setToolTip(
             COL_SIG,
@@ -1669,6 +1671,7 @@ class SignalSimWidget(QWidget):
                 arbitration_id=frame_id,
                 data=data,
                 is_extended_id=frame_id > 0x7FF,
+                is_fd=len(data) > 8,
             )
             self._bus.send(frame)
             # 把本进程发出的帧主动 fan-out 给所有监听者（监控页/报文页）。

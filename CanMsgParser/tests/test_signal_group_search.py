@@ -17,18 +17,18 @@ def _iter_signal_items(w):
     items = []
     for i in range(w._sig_list.topLevelItemCount()):
         top = w._sig_list.topLevelItem(i)
-        if top.data(0, Qt.ItemDataRole.UserRole) is not None:
+        if top.data(0, Qt.ItemDataRole.UserRole + 200) is not None:
             items.append(top)
         for j in range(top.childCount()):
             child = top.child(j)
-            if child.data(0, Qt.ItemDataRole.UserRole) is not None:
+            if child.data(0, Qt.ItemDataRole.UserRole + 200) is not None:
                 items.append(child)
     return items
 
 
 def _find(w, sig_name):
     for it in _iter_signal_items(w):
-        sr = it.data(0, Qt.ItemDataRole.UserRole)
+        sr = it.data(0, Qt.ItemDataRole.UserRole + 200)
         if sr is not None and sr.sig_name == sig_name:
             return it
     return None
